@@ -1,12 +1,13 @@
 import pyaudio
 import wave
 import threading
-import time
+import datetime
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
 def record_audio(filename, recording_length):
+
     audio = pyaudio.PyAudio()
     stream = audio.open(format=pyaudio.paInt16, channels=1, rate=44100, input=True, frames_per_buffer=1024)
     frames = []
@@ -28,12 +29,11 @@ def record_audio(filename, recording_length):
 
 @app.route('/start', methods=['POST'])
 def start():
-    data = request.json
-    recording_length = data.get('recording_length', 15)  # Default length 10 seconds
-    recording_path = data.get('recording_path', 'recording.wav')  # Default path
-    # I might need to change it to blocking, so that i can just to it into a infinite loop and not to worry about sleep
-    threading.Thread(target=record_audio, args=(recording_path, recording_length)).start()
-    return jsonify({"message": "Recording started", "path": recording_path, "length": recording_length})
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    recording_length = 9
+    recording_path = timestamp +'.wav'
+    record_audio(recording_path, recording_length)
+    return jsonify({"message": "Recording Finished", "path": recording_path, "length": recording_length})
 
 if __name__ == '__main__':
     app.run(debug=True, port=5001)
