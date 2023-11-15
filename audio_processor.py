@@ -1,4 +1,5 @@
 import librosa
+import numpy as np
 
 def split_audio(path, chuck_lenght, sample_rate=48000):
 
@@ -11,6 +12,13 @@ def split_audio(path, chuck_lenght, sample_rate=48000):
 
     for i in range(0, len(sig), chunk_size):
         split = sig[i:i + chunk_size]
+        
+        # pad the split array with zeros if it's not the correct length
+        if len(split) < chunk_size:
+            padded_split = np.zeros(chunk_size)
+            padded_split[:len(split)] = split
+            split = padded_split
+
         chunks.append(split)
 
     print(f'Done! Read {len(chunks)} chunks.')

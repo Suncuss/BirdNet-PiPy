@@ -1,4 +1,7 @@
-import tflite_runtime.interpreter as tflite
+try:
+    import tflite_runtime.interpreter as tflite
+except BaseException:
+    from tensorflow import lite as tflite
 import os
 
 class ModelLoader:
@@ -35,8 +38,9 @@ class ModelLoader:
             self.meta_output_layer_index = self.meta_model.get_output_details()[0]['index']
         return self.meta_model
 
-    def load_lables(self):
+    def load_labels(self):
         label_path = os.path.join(self.model_dir, 'labels.txt')
+        # TODO: dynamically load labels from depends on config
         with open(label_path, 'r') as f:
             self.labels = [line.strip() for line in f.readlines()]
         return self.labels

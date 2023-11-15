@@ -36,4 +36,4 @@ def start():
     return jsonify({"message": "Recording started", "path": recording_path, "length": recording_length})
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5001)

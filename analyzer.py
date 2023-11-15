@@ -8,9 +8,9 @@ app = Flask(__name__)
 
 # Load the model at startup
 model_config = {
-    "model_name": "model",
-    "meta_model_name": "meta_model",
-    "model_dir": "path/to/your/model/directory"
+    "model_name": "BirdNET_GLOBAL_6K_V2.4_Model_FP16",
+    "meta_model_name": "BirdNET_GLOBAL_6K_V2.4_MData_Model_FP16",
+    "model_dir": "models"
 }
 
 model_loader = ModelLoader(**model_config)
@@ -19,6 +19,7 @@ meta_model = model_loader.load_meta_model()
 labels = model_loader.load_labels()
 
 def generate_local_species_list(lat, lon, week, meta_model,labels):
+    # For testing LAT 36.0181 LON -78.9697 WEEK 46
     # Generate local species list
     local_species = []
     sf_thresh = 0.03
@@ -39,9 +40,9 @@ def generate_local_species_list(lat, lon, week, meta_model,labels):
 
     return local_species
 
-def predict(model, chunks, labels, sensitivity=1):
+def predict(model, chunks, labels, sensitivity=0.75):
     # Predict
-    predictions = {}
+    predictions = []
     for chunk in chunks:
         model_input = np.array(np.expand_dims(chunk, 0), dtype='float32')
         model.set_tensor(model_loader.input_layer_index, model_input)
@@ -54,10 +55,12 @@ def predict(model, chunks, labels, sensitivity=1):
         model_output = custom_sigmoid(model_output, sensitivity)
         model_output = dict(zip(labels, model_output))
         model_output = sorted(model_output.items(), key=lambda x: x[1], reverse=True)
-        
+
+        #Add it to predictions
+        predictions.append(model_output)
+
         # TODO DEAL with human detection
         # Figure out the key for the dict, should be something akin to timestamp
-
 
     return predictions
 
