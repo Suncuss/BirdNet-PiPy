@@ -1,20 +1,23 @@
 import pyaudio
 import wave
-import threading
 import datetime
 from flask import Flask, request, jsonify
+import config
 
 app = Flask(__name__)
 
 def record_audio(filename, recording_length):
 
+    sample_rate = config.SAMPLE_RATE
+    buffer_size = 1000
+
     audio = pyaudio.PyAudio()
-    stream = audio.open(format=pyaudio.paInt16, channels=1, rate=44100, input=True, frames_per_buffer=1024)
+    stream = audio.open(format=pyaudio.paInt16, channels=1, rate=sample_rate, input=True, frames_per_buffer=buffer_size)
     frames = []
 
     print("Recording started for {} seconds".format(recording_length))
-    for _ in range(0, int(44100 / 1024 * recording_length)):
-        data = stream.read(1024)
+    for _ in range(0, int(sample_rate / buffer_size * recording_length)):
+        data = stream.read(buffer_size)
         frames.append(data)
 
     stream.stop_stream()
@@ -24,7 +27,7 @@ def record_audio(filename, recording_length):
     with wave.open(filename, 'wb') as wf:
         wf.setnchannels(1)
         wf.setsampwidth(audio.get_sample_size(pyaudio.paInt16))
-        wf.setframerate(44100)
+        wf.setframerate(sample_rate)
         wf.writeframes(b''.join(frames))
 
 @app.route('/start', methods=['POST'])

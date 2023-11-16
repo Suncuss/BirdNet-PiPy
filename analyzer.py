@@ -62,16 +62,18 @@ def analyze_audio(model, audio_input, labels, sensitivity, cutoff):
     # Check for the prescence of Human
     human_detection = any('Human' in x[0] for x in model_output)
     if human_detection:
+        print("Human Detected")
         return []
     return model_output
 
 def predict(model, meta_model, audio_file_path, labels, lat, lon, week, sensitivity, cutoff):
     
     chunk_length = config.CHUNK_LENGTH
+    sample_rate = config.SAMPLE_RATE
 
     local_species_list = generate_local_species_list(lat, lon, week, meta_model, labels)
 
-    audio_chunks = split_audio(audio_file_path, chunk_length)
+    audio_chunks = split_audio(audio_file_path, chunk_length, sample_rate)
 
     results = []
 
