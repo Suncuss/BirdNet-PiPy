@@ -34,9 +34,9 @@ def record_audio(filename, recording_length):
 def start():
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     recording_length = 9
-    recording_path = timestamp +'.wav'
+    recording_path = config.AUDIO_DIR + timestamp +'.wav'
     record_audio(recording_path, recording_length)
     return jsonify({"message": "Recording Finished", "path": recording_path, "length": recording_length})
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5001)
+    app.run(debug=True, port=5000)

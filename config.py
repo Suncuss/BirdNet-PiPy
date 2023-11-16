@@ -4,7 +4,7 @@ DEBUG_MODE = True
 ROOT_PATH = "."
 
 # Database configuration
-DATABASE_PATH = 'db/bird.db'
+DATABASE_PATH = 'db/birds.db'
 
 # Model configuration
 
@@ -30,4 +30,9 @@ LON = -78.969
 # Prediction configuration
 SENSITIVITY = 0.75
 CUTOFF = 0.7
+
+
+# Job dispatcher configuration
+INCOMING_DIR = "audio_files"
+PROCESSED_DIR = "processed_audio_files"
 

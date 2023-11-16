@@ -6,7 +6,6 @@ import datetime
 import config
 import utils
 
-
 app = Flask(__name__)
 
 # Load the model at startup
@@ -95,7 +94,7 @@ def predict(model, meta_model, audio_file_path, labels, lat, lon, week, sensitiv
                 "Time": start_time_str,
                 "Sci_Name": species[0].split('_')[0],
                 "Com_Name": species[0].split('_')[1],
-                "Confidence": species[1],
+                "Confidence": float(species[1]),
                 "Lat": lat,
                 "Lon": lon,
                 "Cutoff": cutoff,
@@ -123,12 +122,10 @@ def analyze():
     sensitivity = config.SENSITIVITY
     results = predict(model, meta_model, audio_file_path, labels, lat, lon, week, sensitivity, cutoff)
 
-    # print each element in results
-    for result in results:
-        print(result)
+    print(results)
 
-    return jsonify({"Message": "Analysis Complete"})
+    return jsonify(results)
 
     
 if __name__ == '__main__':
-    app.run(debug=True, port=5005)
+    app.run(debug=True, port=5002)

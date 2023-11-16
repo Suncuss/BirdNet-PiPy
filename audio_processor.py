@@ -7,9 +7,6 @@ def split_audio(path, chuck_lenght, sample_rate):
 
     sig, rate = librosa.load(path, sr=sample_rate, mono=True, res_type='kaiser_fast')
 
-    print("Rate: " + str(rate))
-    print("Sig: " + str(len(sig)))
-
     chunks = []
     chunk_size = int(chuck_lenght * rate)
 

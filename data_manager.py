@@ -1,8 +1,9 @@
 from flask import Flask, request, g, jsonify
 import sqlite3
+import config
 
 app = Flask(__name__)
-DATABASE = 'bird.db'
+DATABASE = config.DATABASE_PATH
 DATABASE_SCHEMA = """
 DROP TABLE IF EXISTS detections;
 CREATE TABLE IF NOT EXISTS detections (
@@ -87,4 +88,5 @@ def read_data():
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=5003)
+

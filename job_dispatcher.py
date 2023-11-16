@@ -2,21 +2,23 @@ from flask import Flask, request, jsonify
 import os
 import shutil
 import uuid
+import config
 
 app = Flask(__name__)
 
-INCOMING_DIR = "audio_files"
-PROCESSED_DIR = "processed_audio_files"
 
 # Utility Functions
 def get_next_file():
+    # only list wav files
+    files = os.listdir(config.INCOMING_DIR)
+    files = [f for f in files if f.endswith('.wav')]
     try:
-        return os.listdir(INCOMING_DIR)[0]  # Get the first file in the directory
+        return files[0]  # Get the first file in the directory
     except IndexError:
         return None  # No files available
 
 def move_file_to_processed(file_name):
-    shutil.move(os.path.join(INCOMING_DIR, file_name), os.path.join(PROCESSED_DIR, file_name))
+    shutil.move(os.path.join(config.INCOMING_DIR, file_name), os.path.join(config.PROCESSED_DIR, file_name))
 
 # Dispatch Task Endpoint
 @app.route('/get_task', methods=['GET'])
@@ -38,4 +40,4 @@ def complete_task():
     return jsonify({"message": f"Task {task_id} with file {file_name} completed"}), 200
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5001)
