@@ -4,6 +4,7 @@ import config
 
 app = Flask(__name__)
 DATABASE = config.DATABASE_PATH
+
 DATABASE_SCHEMA = """
 DROP TABLE IF EXISTS detections;
 CREATE TABLE IF NOT EXISTS detections (
@@ -53,11 +54,12 @@ def insert_data():
         db.commit()
         return jsonify(success=True)
     except sqlite3.Error as e:
+        print("Error inserting data")
+        print(e)
         db.rollback()
         return jsonify(success=False, error=str(e))
 
 
-@app.route('/read', methods=['GET'])
 @app.route('/read', methods=['GET'])
 def read_data():
     db = get_db()

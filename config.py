@@ -1,27 +1,25 @@
 DEBUG_MODE = True
 
 # Root path
-ROOT_PATH = "."
+ROOT_DIR = "./"
 
 # Database configuration
-DATABASE_PATH = 'db/birds.db'
+DATABASE_PATH = ROOT_DIR + 'db/birds.db'
 
 # Model configuration
 
-MODEL_PATH = 'models/BirdNET_GLOBAL_6K_V2.4_Model_FP16.tflite'
-META_MODEL_PATH = 'models/BirdNET_GLOBAL_6K_V2.4_MData_Model_FP16.tflite'
-LABELS_PATH = 'models/labels.txt'
+MODEL_PATH = ROOT_DIR + 'models/BirdNET_GLOBAL_6K_V2.4_Model_FP16.tflite'
+META_MODEL_PATH = ROOT_DIR + 'models/BirdNET_GLOBAL_6K_V2.4_MData_Model_FP16.tflite'
+LABELS_PATH = ROOT_DIR + 'models/labels.txt'
 
 # Audio configuration
-AUDIO_DIR = 'audio_files/'
-CHUNK_LENGTH = 3  # Length of audio chunks in seconds
+RECODING_DIR = ROOT_DIR + 'audio_files/'
+RECORDING_LENGTH = 9  # Total length of audio files in seconds
 SAMPLE_RATE = 48000  # Sample rate of audio files
+RECORDING_CHUNK_LENGTH = 3  # Length of audio chunks in seconds
 
-
-
-LOG_FILE_PATH = 'logs/birdnet.log'
+LOG_FILE_PATH = ROOT_DIR + 'logs/birdnet.log'
 LOGGING_LEVEL = 'INFO'  # Set the logging level to INFO to see BirdNET's output
-
 
 # Geolocation configuration
 LAT = 36.018
@@ -29,10 +27,16 @@ LON = -78.969
 
 # Prediction configuration
 SENSITIVITY = 0.75
-CUTOFF = 0.7
-
+CUTOFF = 0.60
 
 # Job dispatcher configuration
-INCOMING_DIR = "audio_files"
-PROCESSED_DIR = "processed_audio_files"
+INCOMING_DIR = ROOT_DIR + "audio_files/"
+PROCESSED_DIR = ROOT_DIR + "processed_audio_files/"
 
+# Microservice endpoints
+RECORD_ENDPOINT = "http://localhost:5000/start"
+GET_TASK_ENDPOINT = "http://localhost:5001/get_task"
+COMPLETE_TASK_ENDPOINT = "http://localhost:5001/complete_task"
+ANALYZE_ENDPOINT = "http://localhost:5002/analyze"
+DB_INSERT_ENDPOINT = "http://localhost:5003/insert"
+DB_READ_ENDPOINT = "http://localhost:5003/read"

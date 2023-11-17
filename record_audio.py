@@ -33,8 +33,8 @@ def record_audio(filename, recording_length):
 @app.route('/start', methods=['POST'])
 def start():
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    recording_length = 9
-    recording_path = config.AUDIO_DIR + timestamp +'.wav'
+    recording_length = config.RECORDING_LENGTH
+    recording_path = config.RECODING_DIR + timestamp +'.wav'
     record_audio(recording_path, recording_length)
     return jsonify({"message": "Recording Finished", "path": recording_path, "length": recording_length})
 

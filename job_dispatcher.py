@@ -12,6 +12,8 @@ def get_next_file():
     # only list wav files
     files = os.listdir(config.INCOMING_DIR)
     files = [f for f in files if f.endswith('.wav')]
+    files.sort()
+    print("Files in incoming directory: ", files)
     try:
         return files[0]  # Get the first file in the directory
     except IndexError:

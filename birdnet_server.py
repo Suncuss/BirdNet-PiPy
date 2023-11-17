@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify
 import numpy as np
 from model_loader import ModelLoader
-from audio_processor import split_audio
 import datetime
 import config
 import utils
@@ -48,8 +47,10 @@ def analyze_audio(model, audio_input, labels, sensitivity, cutoff):
     model.set_tensor(model_loader.input_layer_index, model_input)
     model.invoke()
     model_output = model.get_tensor(model_loader.output_layer_index)[0]
+    
+    
 
-    def custom_sigmoid(x, sensitivity=1.0):
+    def custom_sigmoid(x, sensitivity=0.75):
         return 1 / (1.0 + np.exp(-sensitivity * x))
     
     model_output = custom_sigmoid(model_output, sensitivity)
@@ -67,18 +68,17 @@ def analyze_audio(model, audio_input, labels, sensitivity, cutoff):
 
 def predict(model, meta_model, audio_file_path, labels, lat, lon, week, sensitivity, cutoff):
     
-    chunk_length = config.CHUNK_LENGTH
+    chunk_length = config.RECORDING_CHUNK_LENGTH
     sample_rate = config.SAMPLE_RATE
 
     local_species_list = generate_local_species_list(lat, lon, week, meta_model, labels)
-
-    audio_chunks = split_audio(audio_file_path, chunk_length, sample_rate)
-
+    audio_chunks = utils.split_audio(audio_file_path, chunk_length, sample_rate)
     results = []
 
     for audio_chunk, chuck_index in zip(audio_chunks, range(len(audio_chunks))):
         species_in_audio = analyze_audio(model, audio_chunk, labels, sensitivity, cutoff)
         filtered_species_list = [x for x in species_in_audio if x[0] in local_species_list]
+        print("Chunk: {}, Species: {}".format(chuck_index, species_in_audio))
 
         # construct result
         file_name = audio_file_path.split('/')[-1]
@@ -106,7 +106,6 @@ def predict(model, meta_model, audio_file_path, labels, lat, lon, week, sensitiv
 
     return results
 
-
 @app.route('/analyze', methods=['POST'])
 
 def analyze():
@@ -121,11 +120,9 @@ def analyze():
     cutoff = config.CUTOFF
     sensitivity = config.SENSITIVITY
     results = predict(model, meta_model, audio_file_path, labels, lat, lon, week, sensitivity, cutoff)
-
-    print(results)
+    print("Finished analyzing file: {}, total detections: {}".format(audio_file_path, len(results)))
 
     return jsonify(results)
-
     
 if __name__ == '__main__':
     app.run(debug=True, port=5002)
