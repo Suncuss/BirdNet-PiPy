@@ -29,6 +29,10 @@ def main_logic():
         results = response.json()
 
         for result in results:
+            # Write to log file
+            log_file_name = file_name.split('.')[0] + '.txt'
+            print(f"Writing {result} to log file {log_file_name}")
+            response = requests.post(config.FILE_WRITE_ENDPOINT, json={"file_name": log_file_name, "data": result})
             # Write to the database
             print(f"Inserting {result} into the database")
             response = requests.post(config.DB_INSERT_ENDPOINT, json=result)

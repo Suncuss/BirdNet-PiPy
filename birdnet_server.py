@@ -48,9 +48,7 @@ def analyze_audio(model, audio_input, labels, sensitivity, cutoff):
     model.invoke()
     model_output = model.get_tensor(model_loader.output_layer_index)[0]
     
-    
-
-    def custom_sigmoid(x, sensitivity=0.75):
+    def custom_sigmoid(x, sensitivity):
         return 1 / (1.0 + np.exp(-sensitivity * x))
     
     model_output = custom_sigmoid(model_output, sensitivity)
@@ -78,7 +76,8 @@ def predict(model, meta_model, audio_file_path, labels, lat, lon, week, sensitiv
     for audio_chunk, chuck_index in zip(audio_chunks, range(len(audio_chunks))):
         species_in_audio = analyze_audio(model, audio_chunk, labels, sensitivity, cutoff)
         filtered_species_list = [x for x in species_in_audio if x[0] in local_species_list]
-        print("Chunk: {}, Species: {}".format(chuck_index, species_in_audio))
+        #top_prediction = filtered_species_list[0] if len(filtered_species_list) > 0 else None
+        print("Chunk: {}, Species: {}".format(chuck_index, filtered_species_list))
 
         # construct result
         file_name = audio_file_path.split('/')[-1]

@@ -1,6 +1,7 @@
 from flask import Flask, request, g, jsonify
 import sqlite3
 import config
+import os
 
 app = Flask(__name__)
 DATABASE = config.DATABASE_PATH
@@ -37,7 +38,7 @@ def close_connection(exception):
     if db is not None:
         db.close()
 
-@app.route('/insert', methods=['POST'])
+@app.route('/db_insert', methods=['POST'])
 def insert_data():
     data = request.json
     db = get_db()
@@ -60,7 +61,7 @@ def insert_data():
         return jsonify(success=False, error=str(e))
 
 
-@app.route('/read', methods=['GET'])
+@app.route('/db_read', methods=['GET'])
 def read_data():
     db = get_db()
     cursor = db.cursor()
@@ -88,6 +89,39 @@ def read_data():
     except sqlite3.Error as e:
         return jsonify(success=False, error=str(e))
 
+@app.route('/db_delete', methods=['DELETE'])
+# TODO: Implement this function
+def delete_data():
+    db = get_db()
+    cursor = db.cursor()
+    try:
+        cursor.execute("DELETE FROM detections")
+        db.commit()
+        return jsonify(success=True)
+    except sqlite3.Error as e:
+        print("Error deleting data")
+        print(e)
+        db.rollback()
+        return jsonify(success=False, error=str(e))
+    
+@app.route('/write_results_to_file', methods=['POST'])
+def write_to_file():
+    data = request.json
+    file_name = data.get('file_name')
+    file_path = config.PROCESS_LOG_DIR + file_name
+    data = data.get('data')
+    result_string = data['Date'] + ',' + data['Time'] + ',' + data['Sci_Name'] + ',' + data['Com_Name'] + ',' + str(data['Confidence']) + ',' + str(data['Lat']) + ',' + str(data['Lon']) + ',' + str(data['Cutoff']) + ',' + str(data['Week']) + ',' + str(data['Sens']) + ',' + str(data['Overlap']) + ',' + data['File_Name'] + '\n'
+    
+    # Append to file, if file exists
+    if os.path.exists(file_path):
+        with open(file_path, 'a') as f:
+            f.write(result_string)
+    # Create file, if file does not exist
+    else:
+        with open(file_path, 'w') as f:
+            f.write(result_string)
+    
+    return jsonify(success=True)
 
 if __name__ == '__main__':
     app.run(debug=True, port=5003)

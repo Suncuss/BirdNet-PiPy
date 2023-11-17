@@ -32,11 +32,13 @@ CUTOFF = 0.60
 # Job dispatcher configuration
 INCOMING_DIR = ROOT_DIR + "audio_files/"
 PROCESSED_DIR = ROOT_DIR + "processed_audio_files/"
+PROCESS_LOG_DIR = ROOT_DIR + "file_processing_log/"
 
 # Microservice endpoints
 RECORD_ENDPOINT = "http://localhost:5000/start"
 GET_TASK_ENDPOINT = "http://localhost:5001/get_task"
 COMPLETE_TASK_ENDPOINT = "http://localhost:5001/complete_task"
 ANALYZE_ENDPOINT = "http://localhost:5002/analyze"
-DB_INSERT_ENDPOINT = "http://localhost:5003/insert"
-DB_READ_ENDPOINT = "http://localhost:5003/read"
+DB_INSERT_ENDPOINT = "http://localhost:5003/db_insert"
+DB_READ_ENDPOINT = "http://localhost:5003/db_read"
+FILE_WRITE_ENDPOINT = "http://localhost:5003/write_results_to_file"
