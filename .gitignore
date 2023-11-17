@@ -7,3 +7,4 @@ server_old.py
 audio_files/
 processed_audio_files/
 _test.py
+file_processing_log/
