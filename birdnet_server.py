@@ -80,27 +80,37 @@ def predict(model, meta_model, audio_file_path, labels, lat, lon, week, sensitiv
         print("Chunk: {}, Species: {}".format(chuck_index, filtered_species_list))
 
         # construct result
-        file_name = audio_file_path.split('/')[-1]
-        file_timestamp_str = file_name.split('.')[0]
+        source_file_name = audio_file_path.split('/')[-1]
+        file_timestamp_str = source_file_name.split('.')[0]
         file_timestamp = datetime.datetime.strptime(file_timestamp_str, "%Y%m%d_%H%M%S")
         start_timestamp = file_timestamp  + datetime.timedelta(seconds=chuck_index * chunk_length)
         start_date_str = start_timestamp.strftime("%Y-%m-%d")
         start_time_str = start_timestamp.strftime("%H:%M:%S")
 
+  
+
         for species in filtered_species_list:
+            sci_name = species[0].split('_')[0]
+            com_name = species[0].split('_')[1]
+            confidence = float(species[1])
+            birg_song_file_name = com_name.replace(' ', '_') + '_' + str(round(confidence * 100)) + '_' + \
+                start_date_str + '-birdnet-' + start_time_str + config.BIRD_SONG_FORMAT
             results.append({
                 "Date": start_date_str,
                 "Time": start_time_str,
-                "Sci_Name": species[0].split('_')[0],
-                "Com_Name": species[0].split('_')[1],
-                "Confidence": float(species[1]),
+                "Sci_Name": sci_name,
+                "Com_Name": com_name,
+                "Confidence": confidence,
                 "Lat": lat,
                 "Lon": lon,
                 "Cutoff": cutoff,
                 "Week": week,
                 "Overlap": 0,
                 "Sens": sensitivity,
-                "File_Name": file_name,
+                "Bird_Song_File_Name": birg_song_file_name,
+                "Bird_Song_Duration": chunk_length,
+                "Source_File_Name": source_file_name
+
             })
 
     return results

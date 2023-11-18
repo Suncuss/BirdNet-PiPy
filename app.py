@@ -28,11 +28,36 @@ def main_logic():
             continue
         results = response.json()
 
+
+
+
+
+        
+        def merge_filenames_if_adjacent(results):
+            # Note: This function also mutate the actual content of result
+            # The side effect is that the item in the incoming list will have its File_Name updated if a merge is performed
+            if not results:
+                return []
+            previous_result = None
+            for result in results:
+                if previous_result and result['Sci_Name'] == previous_result['Sci_Name']:
+                    result['Bird_Song_File_Name'] = previous_result['Bird_Song_File_Name']
+                    result["Bird_Song_Duration"] += previous_result["Bird_Song_Duration"]
+                    previous_result["Bird_Song_Duration"] = result["Bird_Song_Duration"]
+                previous_result = result
+
+            return results
+        
+        merge_filenames_if_adjacent(results)
+
+        # Write the results to the database and log file
         for result in results:
             # Write to log file
             log_file_name = file_name.split('.')[0] + '.txt'
             print(f"Writing {result} to log file {log_file_name}")
             response = requests.post(config.FILE_WRITE_ENDPOINT, json={"file_name": log_file_name, "data": result})
+
+            
             # Write to the database
             print(f"Inserting {result} into the database")
             response = requests.post(config.DB_INSERT_ENDPOINT, json=result)

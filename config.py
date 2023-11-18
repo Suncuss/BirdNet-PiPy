@@ -42,3 +42,31 @@ ANALYZE_ENDPOINT = "http://localhost:5002/analyze"
 DB_INSERT_ENDPOINT = "http://localhost:5003/db_insert"
 DB_READ_ENDPOINT = "http://localhost:5003/db_read"
 FILE_WRITE_ENDPOINT = "http://localhost:5003/write_results_to_file"
+
+# BIRDSONG CONFIG
+BIRD_SONG_FORMAT = '.mp3'
+
+
+# Database schema
+DATABASE_SCHEMA = """
+DROP TABLE IF EXISTS detections;
+CREATE TABLE IF NOT EXISTS detections (
+  Date DATE,
+  Time TIME,
+  Sci_Name VARCHAR(100) NOT NULL,
+  Com_Name VARCHAR(100) NOT NULL,
+  Confidence FLOAT,
+  Lat FLOAT,
+  Lon FLOAT,
+  Cutoff FLOAT,
+  Week INT,
+  Sens FLOAT,
+  Overlap FLOAT,
+  Bird_Song_File_Name VARCHAR(100) NOT NULL,
+  Source_File_Name VARCHAR(100) NOT NULL,
+  Bird_Song_Duration FLOAT
+
+);
+CREATE INDEX detections_Com_Name ON detections (Com_Name);
+CREATE INDEX detections_Date_Time ON detections (Date DESC, Time DESC);
+"""

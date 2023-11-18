@@ -20,7 +20,10 @@ CREATE TABLE IF NOT EXISTS detections (
   Week INT,
   Sens FLOAT,
   Overlap FLOAT,
-  File_Name VARCHAR(100) NOT NULL
+  Bird_Song_File_Name VARCHAR(100) NOT NULL
+  Source_File_Name VARCHAR(100) NOT NULL
+  Bird_Song_Duration FLOAT
+
 );
 CREATE INDEX detections_Com_Name ON detections (Com_Name);
 CREATE INDEX detections_Date_Time ON detections (Date DESC, Time DESC);
@@ -46,11 +49,11 @@ def insert_data():
 
     try:
         cursor.execute("""
-            INSERT INTO detections (Date, Time, Sci_Name, Com_Name, Confidence, Lat, Lon, Cutoff, Week, Sens, Overlap, File_Name) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO detections (Date, Time, Sci_Name, Com_Name, Confidence, Lat, Lon, Cutoff, Week, Sens, Overlap, Bird_Song_File_Name, Source_File_Name, Bird_Song_Duration) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (data['Date'], data['Time'], data['Sci_Name'], data['Com_Name'], 
                   data['Confidence'], data['Lat'], data['Lon'], data['Cutoff'], 
-                  data['Week'], data['Sens'], data['Overlap'], data['File_Name']))
+                  data['Week'], data['Sens'], data['Overlap'], data['Bird_Song_File_Name'], data['Source_File_Name'], data['Bird_Song_Duration']))
 
         db.commit()
         return jsonify(success=True)
@@ -63,6 +66,7 @@ def insert_data():
 
 @app.route('/db_read', methods=['GET'])
 def read_data():
+    # NOT TESTED YET
     db = get_db()
     cursor = db.cursor()
     try:
@@ -110,7 +114,9 @@ def write_to_file():
     file_name = data.get('file_name')
     file_path = config.PROCESS_LOG_DIR + file_name
     data = data.get('data')
-    result_string = data['Date'] + ',' + data['Time'] + ',' + data['Sci_Name'] + ',' + data['Com_Name'] + ',' + str(data['Confidence']) + ',' + str(data['Lat']) + ',' + str(data['Lon']) + ',' + str(data['Cutoff']) + ',' + str(data['Week']) + ',' + str(data['Sens']) + ',' + str(data['Overlap']) + ',' + data['File_Name'] + '\n'
+    result_string = data['Date'] + ',' + data['Time'] + ',' + data['Sci_Name'] + ',' + data['Com_Name'] \
+        + ',' + str(data['Confidence']) + ',' + str(data['Lat']) + ',' + str(data['Lon']) + ',' + str(data['Cutoff']) + ',' + str(data['Week']) + ',' + str(data['Sens']) + ',' + \
+              str(data['Overlap']) + ',' + str(data['Bird_Song_File_Name']) + ',' +  str(data['Bird_Song_Duration']) + ',' + str(data['Source_File_Name']) + '\n'
     
     # Append to file, if file exists
     if os.path.exists(file_path):
