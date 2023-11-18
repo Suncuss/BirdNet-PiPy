@@ -49,11 +49,11 @@ def insert_data():
 
     try:
         cursor.execute("""
-            INSERT INTO detections (Date, Time, Sci_Name, Com_Name, Confidence, Lat, Lon, Cutoff, Week, Sens, Overlap, Bird_Song_File_Name, Source_File_Name, Bird_Song_Duration) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO detections (Date, Time, Sci_Name, Com_Name, Confidence, Lat, Lon, Cutoff, Week, Sens, Bird_Song_File_Name) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (data['Date'], data['Time'], data['Sci_Name'], data['Com_Name'], 
                   data['Confidence'], data['Lat'], data['Lon'], data['Cutoff'], 
-                  data['Week'], data['Sens'], data['Overlap'], data['Bird_Song_File_Name'], data['Source_File_Name'], data['Bird_Song_Duration']))
+                  data['Week'], data['Sens'], data['Bird_Song_File_Name']))
 
         db.commit()
         return jsonify(success=True)
@@ -114,10 +114,10 @@ def write_to_file():
     file_name = data.get('file_name')
     file_path = config.PROCESS_LOG_DIR + file_name
     data = data.get('data')
-    result_string = data['Date'] + ',' + data['Time'] + ',' + data['Sci_Name'] + ',' + data['Com_Name'] \
-        + ',' + str(data['Confidence']) + ',' + str(data['Lat']) + ',' + str(data['Lon']) + ',' + str(data['Cutoff']) + ',' + str(data['Week']) + ',' + str(data['Sens']) + ',' + \
-              str(data['Overlap']) + ',' + str(data['Bird_Song_File_Name']) + ',' +  str(data['Bird_Song_Duration']) + ',' + str(data['Source_File_Name']) + '\n'
-    
+    result_string = (
+        f"{data['Date']},{data['Time']},{data['Sci_Name']},{data['Com_Name']},{data['Confidence']},"
+        f"{data['Source_File_Name']},{data['Chunk_Index']},{data['Bird_Song_Duration']},{data['Bird_Song_File_Name']}\n"
+    )
     # Append to file, if file exists
     if os.path.exists(file_path):
         with open(file_path, 'a') as f:
@@ -125,6 +125,7 @@ def write_to_file():
     # Create file, if file does not exist
     else:
         with open(file_path, 'w') as f:
+            f.write("Date,Time,Sci_Name,Com_Name,Confidence,Source_File_Name,Chunk_Index,Bird_Song_Duration,Bird_Song_File_Name\n")
             f.write(result_string)
     
     return jsonify(success=True)

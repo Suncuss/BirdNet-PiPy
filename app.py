@@ -29,9 +29,6 @@ def main_logic():
         results = response.json()
 
 
-
-
-
         
         def merge_filenames_if_adjacent(results):
             # Note: This function also mutate the actual content of result
@@ -53,7 +50,7 @@ def main_logic():
         # Write the results to the database and log file
         for result in results:
             # Write to log file
-            log_file_name = file_name.split('.')[0] + '.txt'
+            log_file_name = file_name.split('.')[0] + '.csv'
             print(f"Writing {result} to log file {log_file_name}")
             response = requests.post(config.FILE_WRITE_ENDPOINT, json={"file_name": log_file_name, "data": result})
 

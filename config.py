@@ -59,12 +59,9 @@ CREATE TABLE IF NOT EXISTS detections (
   Lat FLOAT,
   Lon FLOAT,
   Cutoff FLOAT,
-  Week INT,
   Sens FLOAT,
-  Overlap FLOAT,
-  Bird_Song_File_Name VARCHAR(100) NOT NULL,
-  Source_File_Name VARCHAR(100) NOT NULL,
-  Bird_Song_Duration FLOAT
+  Week INT,
+  Bird_Song_File_Name VARCHAR(100) NOT NULL
 
 );
 CREATE INDEX detections_Com_Name ON detections (Com_Name);

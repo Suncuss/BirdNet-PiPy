@@ -74,10 +74,8 @@ def predict(model, meta_model, audio_file_path, labels, lat, lon, week, sensitiv
     results = []
 
     for audio_chunk, chuck_index in zip(audio_chunks, range(len(audio_chunks))):
-        species_in_audio = analyze_audio(model, audio_chunk, labels, sensitivity, cutoff)
-        filtered_species_list = [x for x in species_in_audio if x[0] in local_species_list]
-        #top_prediction = filtered_species_list[0] if len(filtered_species_list) > 0 else None
-        print("Chunk: {}, Species: {}".format(chuck_index, filtered_species_list))
+        species_in_audio_chunk = analyze_audio(model, audio_chunk, labels, sensitivity, cutoff)
+        filtered_species_list = [x for x in species_in_audio_chunk if x[0] in local_species_list]
 
         # construct result
         source_file_name = audio_file_path.split('/')[-1]
@@ -87,14 +85,16 @@ def predict(model, meta_model, audio_file_path, labels, lat, lon, week, sensitiv
         start_date_str = start_timestamp.strftime("%Y-%m-%d")
         start_time_str = start_timestamp.strftime("%H:%M:%S")
 
-  
 
         for species in filtered_species_list:
             sci_name = species[0].split('_')[0]
             com_name = species[0].split('_')[1]
-            confidence = float(species[1])
-            birg_song_file_name = com_name.replace(' ', '_') + '_' + str(round(confidence * 100)) + '_' + \
-                start_date_str + '-birdnet-' + start_time_str + config.BIRD_SONG_FORMAT
+            confidence = float(species[1])            
+            birg_song_file_name = (
+                f"{com_name.replace(' ', '_')}_{round(confidence * 100)}_"
+                f"{start_date_str}-birdnet-{start_time_str}{config.BIRD_SONG_FORMAT}"
+            )
+            
             results.append({
                 "Date": start_date_str,
                 "Time": start_time_str,
@@ -105,12 +105,11 @@ def predict(model, meta_model, audio_file_path, labels, lat, lon, week, sensitiv
                 "Lon": lon,
                 "Cutoff": cutoff,
                 "Week": week,
-                "Overlap": 0,
                 "Sens": sensitivity,
                 "Bird_Song_File_Name": birg_song_file_name,
                 "Bird_Song_Duration": chunk_length,
-                "Source_File_Name": source_file_name
-
+                "Source_File_Name": source_file_name,
+                "Chunk_Index": chuck_index
             })
 
     return results
