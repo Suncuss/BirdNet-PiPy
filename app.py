@@ -28,13 +28,12 @@ def main_logic():
             continue
         results = response.json()
 
-
         
         def merge_filenames_if_adjacent(results):
             # Note: This function also mutate the actual content of result
             # The side effect is that the item in the incoming list will have its File_Name updated if a merge is performed
             if not results:
-                return []
+                return
             previous_result = None
             for result in results:
                 if previous_result and result['Sci_Name'] == previous_result['Sci_Name']:
@@ -43,7 +42,6 @@ def main_logic():
                     previous_result["Bird_Song_Duration"] = result["Bird_Song_Duration"]
                 previous_result = result
 
-            return results
         
         merge_filenames_if_adjacent(results)
 
@@ -62,7 +60,11 @@ def main_logic():
                 print("Error inserting into database, retrying in 3 seconds...")
                 time.sleep(3)
                 continue
-        
+
+        # Clip the analyzed audio file and generate spectrograms
+        print("Clipping audio file")
+
+
         # Complete the task
         response = requests.post(config.COMPLETE_TASK_ENDPOINT, json={"task_id": task_id, "file_name": file_name})
         print("Completed task")

@@ -76,18 +76,17 @@ def read_data():
         detections_list = []
         for detection in detections:
             detections_list.append({
-                'Date': detection[0],
-                'Time': detection[1],
-                'Sci_Name': detection[2],
-                'Com_Name': detection[3],
-                'Confidence': detection[4],
-                'Lat': detection[5],
-                'Lon': detection[6],
-                'Cutoff': detection[7],
-                'Week': detection[8],
-                'Sens': detection[9],
-                'Overlap': detection[10],
-                'File_Name': detection[11]
+                "Date": detection[0],
+                "Time": detection[1],
+                "Sci_Name": detection[2],
+                "Com_Name": detection[3],
+                "Confidence": detection[4],
+                "Lat": detection[5],
+                "Lon": detection[6],
+                "Cutoff": detection[7],
+                "Week": detection[8],
+                "Sens": detection[9],
+                "Bird_Song_File_Name": detection[10]
             })
         return jsonify(detections_list)
     except sqlite3.Error as e:

@@ -8,3 +8,5 @@ audio_files/
 processed_audio_files/
 _test.py
 file_processing_log/
+color_maps_preview/
+extracted_audio_files/

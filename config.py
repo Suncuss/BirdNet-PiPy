@@ -5,6 +5,25 @@ ROOT_DIR = "./"
 
 # Database configuration
 DATABASE_PATH = ROOT_DIR + 'db/birds.db'
+DATABASE_SCHEMA = """
+DROP TABLE IF EXISTS detections;
+CREATE TABLE IF NOT EXISTS detections (
+  Date DATE,
+  Time TIME,
+  Sci_Name VARCHAR(100) NOT NULL,
+  Com_Name VARCHAR(100) NOT NULL,
+  Confidence FLOAT,
+  Lat FLOAT,
+  Lon FLOAT,
+  Cutoff FLOAT,
+  Sens FLOAT,
+  Week INT,
+  Bird_Song_File_Name VARCHAR(100) NOT NULL
+
+);
+CREATE INDEX detections_Com_Name ON detections (Com_Name);
+CREATE INDEX detections_Date_Time ON detections (Date DESC, Time DESC);
+"""
 
 # Model configuration
 
@@ -18,6 +37,7 @@ RECORDING_LENGTH = 9  # Total length of audio files in seconds
 SAMPLE_RATE = 48000  # Sample rate of audio files
 RECORDING_CHUNK_LENGTH = 3  # Length of audio chunks in seconds
 
+# Logging configuration
 LOG_FILE_PATH = ROOT_DIR + 'logs/birdnet.log'
 LOGGING_LEVEL = 'INFO'  # Set the logging level to INFO to see BirdNET's output
 
@@ -44,26 +64,11 @@ DB_READ_ENDPOINT = "http://localhost:5003/db_read"
 FILE_WRITE_ENDPOINT = "http://localhost:5003/write_results_to_file"
 
 # BIRDSONG CONFIG
-BIRD_SONG_FORMAT = '.mp3'
+BIRD_SONG_FORMAT = '.wav'
 
+# Spectrogram configuration
 
-# Database schema
-DATABASE_SCHEMA = """
-DROP TABLE IF EXISTS detections;
-CREATE TABLE IF NOT EXISTS detections (
-  Date DATE,
-  Time TIME,
-  Sci_Name VARCHAR(100) NOT NULL,
-  Com_Name VARCHAR(100) NOT NULL,
-  Confidence FLOAT,
-  Lat FLOAT,
-  Lon FLOAT,
-  Cutoff FLOAT,
-  Sens FLOAT,
-  Week INT,
-  Bird_Song_File_Name VARCHAR(100) NOT NULL
-
-);
-CREATE INDEX detections_Com_Name ON detections (Com_Name);
-CREATE INDEX detections_Date_Time ON detections (Date DESC, Time DESC);
-"""
+SPECTROGRAM_MAX_FREQ_IN_KHZ = 22
+SPECTROGRAM_MIN_FREQ_IN_KHZ = 0
+SPECTROGRAM_MAX_DBFS = 0
+SPECTROGRAM_MIN_DBFS = -200
