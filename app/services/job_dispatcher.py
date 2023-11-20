@@ -39,6 +39,7 @@ def get_task():
 def complete_task():
     task_id = request.json.get('task_id')  # In a real-world scenario, you would use this to track the task
     file_name = request.json.get('file_name')
+    print(f"Task {task_id} with file {file_name} completed, moving to processed directory")
     move_file_to_processed(file_name)
     return jsonify({"message": f"Task {task_id} with file {file_name} completed"}), 200
 

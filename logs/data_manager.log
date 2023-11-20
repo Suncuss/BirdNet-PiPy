@@ -1,0 +1,67 @@
+ * Serving Flask app 'data_manager'
+ * Debug mode: on
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5003
+[33mPress CTRL+C to quit[0m
+ * Restarting with stat
+ * Debugger is active!
+ * Debugger PIN: 118-117-002
+127.0.0.1 - - [20/Nov/2023 17:09:39] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:39] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:39] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:39] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:39] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:40] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:40] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:40] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:40] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:40] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:41] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:41] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:41] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:41] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:41] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:42] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:42] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:42] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:42] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:43] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:43] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:43] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:44] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:44] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:44] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:44] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:45] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:45] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:46] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:46] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:47] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:47] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:47] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:47] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:47] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:47] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:48] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:48] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:49] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:49] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:49] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:49] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:49] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:50] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:50] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:51] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:51] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:52] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:52] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:52] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:52] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:53] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:53] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:54] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:54] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:55] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:55] "POST /db_insert HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:55] "POST /write_log_to_file HTTP/1.1" 200 -
+127.0.0.1 - - [20/Nov/2023 17:09:55] "POST /db_insert HTTP/1.1" 200 -

@@ -24,32 +24,9 @@ def main_logic():
             continue
         detections = response.json()
 
-        
-        def merge_detections(detections):
-            if not detections:
-                return []
-
-            merged_detections = []
-            prev_detection = None
-
-            for detection in detections:
-                if prev_detection and detection['Sci_Name'] == prev_detection['Sci_Name']:
-                    # Add the current detection's duration to the previous (merged) detection
-                    prev_detection["Bird_Song_Duration"] += detection["Bird_Song_Duration"]
-                else:
-                    # If not a match, add the previous detection to the list (if it exists)
-                    if prev_detection:
-                        merged_detections.append(prev_detection)
-                    # Start a new merge group with a copy of the current detection
-                    prev_detection = detection.copy()
-
-            # Add the last detection
-            merged_detections.append(prev_detection)
-
-            return merged_detections
-
-        # For generating audio clips and spectrograms
+        # Merge neighboring detections of the same species
         merged_detections = merge_detections(detections)
+        
         for detection in merged_detections:
             # Generate the audio clip
             start_time = detection['Chunk_Index'] * config.RECORDING_CHUNK_LENGTH
@@ -64,7 +41,6 @@ def main_logic():
                 "trimmed_audio_file_path": audio_clip_file_path
             })
 
-
             # Generate the spectrogram
             spectrogram_file_path = os.path.join(config.SPECTROGRAM_DIR, detection['Bird_Song_File_Name'].split('.')[0] + '.png')
             response = requests.post(config.SPECTROGRAM_GENERATION_ENDPOINT, json={
@@ -73,33 +49,13 @@ def main_logic():
                 "graph_title": f"{detection['Com_Name']} {detection['Date']} {detection['Time']}"
             })
 
-
-        # Write merged result to log file
-        for result in merged_detections:
+            # Write the results to the log file
             log_file_name = file_name.split('.')[0] + '.csv'
-            response = requests.post(config.LOGGING_ENDPOINT, json={"file_name": log_file_name, "data": result})
+            response = requests.post(config.LOGGING_ENDPOINT, json={"file_name": log_file_name, "data": detection})
 
-
-        def update_original_detections(original_detections, merged_detections):
-            merged_index = 0
-            for original in original_detections:
-                if merged_index >= len(merged_detections):
-                    break
-
-                # Update the filename if the Sci_Name matches
-                if original['Sci_Name'] == merged_detections[merged_index]['Sci_Name']:
-                    original['Bird_Song_File_Name'] = merged_detections[merged_index]['Bird_Song_File_Name']
-                else:
-                    # Move to the next merged detection if the Sci_Names do not match
-                    merged_index += 1
-
-                    # Check and update the filename for the current original detection again
-                    if original['Sci_Name'] == merged_detections[merged_index]['Sci_Name']:
-                        original['Bird_Song_File_Name'] = merged_detections[merged_index]['Bird_Song_File_Name']
-
+        
+        # Update the original detections with new file name in the merged detections
         update_original_detections(detections, merged_detections)
-
-
         DATA_BASE_WRITE_FAIL = False
         # Write the results to the database and log file
         for result in detections:
@@ -111,18 +67,52 @@ def main_logic():
                 time.sleep(3)
                 DATA_BASE_WRITE_FAIL = True
                 break
-
         if DATA_BASE_WRITE_FAIL:
             # this will start the loop again and retry the whole file since the current file has never been completed
             # but if the insert failed in the middle of inserting results to db, then the the already inserted results might be re-inserted
             continue
 
-        # Clip the analyzed audio file and generate spectrograms
-        print("Clipping audio file")
-
-
-        # Complete the task
+        # Mark the task as complete
         response = requests.post(config.COMPLETE_TASK_ENDPOINT, json={"task_id": task_id, "file_name": file_name})
         print("Completed task")
 
-    
+            
+def merge_detections(detections):
+    if not detections:
+        return []
+
+    merged_detections = []
+    prev_detection = None
+
+    for detection in detections:
+        if prev_detection and detection['Sci_Name'] == prev_detection['Sci_Name']:
+            # Add the current detection's duration to the previous (merged) detection
+            prev_detection["Bird_Song_Duration"] += detection["Bird_Song_Duration"]
+        else:
+            # If not a match, add the previous detection to the list (if it exists)
+            if prev_detection:
+                merged_detections.append(prev_detection)
+            # Start a new merge group with a copy of the current detection
+            prev_detection = detection.copy()
+
+    # Add the last detection
+    merged_detections.append(prev_detection)
+
+    return merged_detections
+
+def update_original_detections(original_detections, merged_detections):
+    merged_index = 0
+    for original in original_detections:
+        if merged_index >= len(merged_detections):
+            break
+
+        # Update the filename if the Sci_Name matches
+        if original['Sci_Name'] == merged_detections[merged_index]['Sci_Name']:
+            original['Bird_Song_File_Name'] = merged_detections[merged_index]['Bird_Song_File_Name']
+        else:
+            # Move to the next merged detection if the Sci_Names do not match
+            merged_index += 1
+
+            # Check and update the filename for the current original detection again
+            if original['Sci_Name'] == merged_detections[merged_index]['Sci_Name']:
+                original['Bird_Song_File_Name'] = merged_detections[merged_index]['Bird_Song_File_Name']

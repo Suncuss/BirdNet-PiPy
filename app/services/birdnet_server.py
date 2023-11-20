@@ -23,7 +23,6 @@ meta_model = model_loader.load_meta_model()
 labels = model_loader.load_labels()
 
 def generate_local_species_list(lat, lon, week, meta_model,labels):
-    # Generate local species list
     local_species = []
     sf_thresh = 0.03
 
@@ -62,7 +61,7 @@ def analyze_audio(model, audio_input, labels, sensitivity, cutoff):
     # Check for the prescence of Human
     human_detection = any('Human' in x[0] for x in model_output)
     if human_detection:
-        print("Human Detected")
+        print("Human Detected, discarding audio chunk.")
         return []
     return model_output
 
@@ -70,11 +69,15 @@ def predict(model, meta_model, audio_file_path, labels, lat, lon, week, sensitiv
     
     chunk_length = config.RECORDING_CHUNK_LENGTH
     sample_rate = config.SAMPLE_RATE
-
+    
+    print(f"Generating local species list with lat: {lat}, lon: {lon}, week: {week}")
     local_species_list = generate_local_species_list(lat, lon, week, meta_model, labels)
+    
+    print(f"Spliiting audio file {audio_file_path} into {chunk_length} second chunks")
     audio_chunks = utils.split_audio(audio_file_path, chunk_length, sample_rate)
+    
+    print(f"Analyzing audio chunks with sensitivity: {sensitivity}, cutoff: {cutoff}")
     results = []
-
     for audio_chunk, chuck_index in zip(audio_chunks, range(len(audio_chunks))):
         species_in_audio_chunk = analyze_audio(model, audio_chunk, labels, sensitivity, cutoff)
         filtered_species_list = [x for x in species_in_audio_chunk if x[0] in local_species_list]

@@ -24,15 +24,21 @@ PROCESSED_DIR = f'{BASE_DIR}/data/processed_recordings'
 PROCESS_LOG_DIR = f'{BASE_DIR}/data/logs'
 
 # Microservice endpoints
-RECORD_ENDPOINT = "http://localhost:5000/start"
+RECORD_ENDPOINT = "http://localhost:5000/record_audio"
+AUDIO_TRIMING_ENDPOINT = "http://localhost:5000/trim_audio"
+SPECTROGRAM_GENERATION_ENDPOINT = "http://localhost:5000/generate_spectrogram"
+
 GET_TASK_ENDPOINT = "http://localhost:5001/get_task"
 COMPLETE_TASK_ENDPOINT = "http://localhost:5001/complete_task"
+
 ANALYZE_ENDPOINT = "http://localhost:5002/analyze"
+
 DB_INSERT_ENDPOINT = "http://localhost:5003/db_insert"
-DB_READ_ENDPOINT = "http://localhost:5003/db_read"
+DB_READ_ALL_ENDPOINT = "http://localhost:5003/db_read_all"
+DB_READ_ENDPOINT = "http://localhost:5003/db_read_record_with_id"
+DB_DELETE_ENDPOINT = "http://localhost:5003/delete"
 LOGGING_ENDPOINT = "http://localhost:5003/write_log_to_file"
-AUDIO_TRIMING_ENDPOINT = "http://localhost:5004/trim_audio"
-SPECTROGRAM_GENERATION_ENDPOINT = "http://localhost:5004/generate_spectrogram"
+
 
 # BIRDSONG CONFIG
 BIRD_SONG_FORMAT = '.wav'
@@ -56,6 +62,7 @@ DATABASE_PATH = f'{BASE_DIR}/data/db/birds.db'
 DATABASE_SCHEMA = """
 DROP TABLE IF EXISTS detections;
 CREATE TABLE IF NOT EXISTS detections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     Date DATE,
     Time TIME,
     Sci_Name VARCHAR(100) NOT NULL,

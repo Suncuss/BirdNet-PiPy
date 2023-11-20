@@ -1,12 +1,13 @@
-import os
 import datetime
 
 import sox
 import librosa
+import wave
+import pyaudio
+import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import numpy as np
 from scipy.io import wavfile
 from scipy.signal import spectrogram
 
@@ -16,6 +17,29 @@ def get_week_of_year():
     today = datetime.datetime.today()
     return today.isocalendar()[1]
 
+def record_audio(file_path, recording_length):
+
+    sample_rate = config.SAMPLE_RATE
+    buffer_size = 1000
+
+    audio = pyaudio.PyAudio()
+    stream = audio.open(format=pyaudio.paInt16, channels=1, rate=sample_rate, input=True, frames_per_buffer=buffer_size)
+    frames = []
+
+    print("Recording started for {} seconds".format(recording_length))
+    for _ in range(0, int(sample_rate / buffer_size * recording_length)):
+        data = stream.read(buffer_size)
+        frames.append(data)
+
+    stream.stop_stream()
+    stream.close()
+    audio.terminate()
+
+    with wave.open(file_path, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(audio.get_sample_size(pyaudio.paInt16))
+        wf.setframerate(sample_rate)
+        wf.writeframes(b''.join(frames))
 
 def split_audio(path, chuck_lenght, sample_rate):
     print('Reading audio data...', end=' ', flush=True)
@@ -82,7 +106,6 @@ def generate_spectrogram(input_file_path, output_file_path, graph_title):
                 extent=[times.min(), times.max(), frequencies.min(), frequencies.max()],
                 vmin=config.SPECTROGRAM_MIN_DBFS, vmax=config.SPECTROGRAM_MAX_DBFS)
     
-    
     plt.title(graph_title, fontsize=14)
     plt.ylabel('Frequency [kHz]', fontsize=14)
     plt.xlabel('Time [sec]', fontsize=14)
@@ -98,21 +121,3 @@ def generate_spectrogram(input_file_path, output_file_path, graph_title):
     # Save the plot
     plt.savefig(output_file_path, dpi=100, bbox_inches='tight')
     plt.close()
-
-
-# source_file_path = 'processed_audio_files/20231116_150407.wav'
-# output_audio_path = 'extracted_audio_files/Carolina_Chickadee_99_2023-11-16-birdnet-15:04:10.wav'
-# song_bird_file_name = 'Carolina_Chickadee_99_2023-11-16-birdnet-15:04:10.wav'
-# output_spectrogram_path = 'extracted_audio_files/Carolina_Chickadee_99_2023-11-16-birdnet-15:04:10.png'
-
-# generate_spectrogram(output_audio_path, output_spectrogram_path, "Carolina Chickadee 12/16/2023 15:04:10")
-
-# File utils
-def save_recording_file(file_data, file_name):
-    file_path = os.path.join(config.AUDIO_FILES_DIRECTORY, file_name)
-    with open(file_path, 'wb') as file:
-        file.write(file_data)
-    return file_path
-
-def get_audio_file_path(file_name):
-    return os.path.join(config.AUDIO_FILES_DIRECTORY, file_name)
