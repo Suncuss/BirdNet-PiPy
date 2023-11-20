@@ -1,5 +1,3 @@
-import os
-
 from tensorflow import lite as tflite
 
 class ModelLoader:

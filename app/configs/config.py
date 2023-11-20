@@ -30,7 +30,9 @@ COMPLETE_TASK_ENDPOINT = "http://localhost:5001/complete_task"
 ANALYZE_ENDPOINT = "http://localhost:5002/analyze"
 DB_INSERT_ENDPOINT = "http://localhost:5003/db_insert"
 DB_READ_ENDPOINT = "http://localhost:5003/db_read"
-FILE_WRITE_ENDPOINT = "http://localhost:5003/write_results_to_file"
+LOGGING_ENDPOINT = "http://localhost:5003/write_log_to_file"
+AUDIO_TRIMING_ENDPOINT = "http://localhost:5004/trim_audio"
+SPECTROGRAM_GENERATION_ENDPOINT = "http://localhost:5004/generate_spectrogram"
 
 # BIRDSONG CONFIG
 BIRD_SONG_FORMAT = '.wav'

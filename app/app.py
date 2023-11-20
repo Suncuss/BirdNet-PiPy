@@ -1,13 +1,8 @@
+import os
 import time
 import requests
 
 from configs import config
-
-def create_test_data():
-    for i in range(5):
-        response = requests.post(config.RECORD_ENDPOINT)
-        print(response.json())
-    print("Created test data")
 
 def main_logic():
     while True:
@@ -27,38 +22,87 @@ def main_logic():
             print("Error analyzing file, retrying in 3 seconds...")
             time.sleep(3)
             continue
-        results = response.json()
+        detections = response.json()
 
         
-        def merge_filenames_if_adjacent(results):
-            # Note: This function also mutate the actual content of result
-            # The side effect is that the item in the incoming list will have its File_Name updated if a merge is performed
-            if not results:
-                return
-            previous_result = None
-            for result in results:
-                if previous_result and result['Sci_Name'] == previous_result['Sci_Name']:
-                    result['Bird_Song_File_Name'] = previous_result['Bird_Song_File_Name']
-                    result["Bird_Song_Duration"] += previous_result["Bird_Song_Duration"]
-                    previous_result["Bird_Song_Duration"] = result["Bird_Song_Duration"]
-                previous_result = result
+        def merge_detections(detections):
+            if not detections:
+                return []
 
-        
-        merge_filenames_if_adjacent(results)
+            merged_detections = []
+            prev_detection = None
 
-        # Error handling and retry logic need more work and test
-        # contiune inside loop won't work becuase it will just skip the current item in list and continue to the next one
-        # so you can have all the db insertion operation failed yet still continue to the next file
+            for detection in detections:
+                if prev_detection and detection['Sci_Name'] == prev_detection['Sci_Name']:
+                    # Add the current detection's duration to the previous (merged) detection
+                    prev_detection["Bird_Song_Duration"] += detection["Bird_Song_Duration"]
+                else:
+                    # If not a match, add the previous detection to the list (if it exists)
+                    if prev_detection:
+                        merged_detections.append(prev_detection)
+                    # Start a new merge group with a copy of the current detection
+                    prev_detection = detection.copy()
+
+            # Add the last detection
+            merged_detections.append(prev_detection)
+
+            return merged_detections
+
+        # For generating audio clips and spectrograms
+        merged_detections = merge_detections(detections)
+        for detection in merged_detections:
+            # Generate the audio clip
+            start_time = detection['Chunk_Index'] * config.RECORDING_CHUNK_LENGTH
+            end_time = start_time + detection['Bird_Song_Duration']
+            audio_file_path = os.path.join(config.RECODING_DIR, file_name)
+            audio_clip_file_path = os.path.join(config.EXTRACTED_AUDIO_DIR, detection['Bird_Song_File_Name'])
+            
+            response = requests.post(config.AUDIO_TRIMING_ENDPOINT, json={
+                "audio_file_path": audio_file_path,
+                "start_time": start_time,
+                "end_time": end_time,
+                "trimmed_audio_file_path": audio_clip_file_path
+            })
+
+
+            # Generate the spectrogram
+            spectrogram_file_path = os.path.join(config.SPECTROGRAM_DIR, detection['Bird_Song_File_Name'].split('.')[0] + '.png')
+            response = requests.post(config.SPECTROGRAM_GENERATION_ENDPOINT, json={
+                "audio_file_path": audio_clip_file_path,
+                "spectrogram_file_path": spectrogram_file_path,
+                "graph_title": f"{detection['Com_Name']} {detection['Date']} {detection['Time']}"
+            })
+
+
+        # Write merged result to log file
+        for result in merged_detections:
+            log_file_name = file_name.split('.')[0] + '.csv'
+            response = requests.post(config.LOGGING_ENDPOINT, json={"file_name": log_file_name, "data": result})
+
+
+        def update_original_detections(original_detections, merged_detections):
+            merged_index = 0
+            for original in original_detections:
+                if merged_index >= len(merged_detections):
+                    break
+
+                # Update the filename if the Sci_Name matches
+                if original['Sci_Name'] == merged_detections[merged_index]['Sci_Name']:
+                    original['Bird_Song_File_Name'] = merged_detections[merged_index]['Bird_Song_File_Name']
+                else:
+                    # Move to the next merged detection if the Sci_Names do not match
+                    merged_index += 1
+
+                    # Check and update the filename for the current original detection again
+                    if original['Sci_Name'] == merged_detections[merged_index]['Sci_Name']:
+                        original['Bird_Song_File_Name'] = merged_detections[merged_index]['Bird_Song_File_Name']
+
+        update_original_detections(detections, merged_detections)
+
 
         DATA_BASE_WRITE_FAIL = False
         # Write the results to the database and log file
-
-        for result in results:
-            # Write to log file
-            log_file_name = file_name.split('.')[0] + '.csv'
-            print(f"Writing {result} to log file {log_file_name}")
-            response = requests.post(config.FILE_WRITE_ENDPOINT, json={"file_name": log_file_name, "data": result})
-
+        for result in detections:
             # Write to the database
             print(f"Inserting {result} into the database")
             response = requests.post(config.DB_INSERT_ENDPOINT, json=result)

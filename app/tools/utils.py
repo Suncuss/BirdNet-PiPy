@@ -3,6 +3,8 @@ import datetime
 
 import sox
 import librosa
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.io import wavfile
@@ -44,8 +46,8 @@ def calulate_padded_start_and_end(start, end, total_length):
     # Calculate the start and end time
 
     padding = (total_length - (end - start)) / 2
-    start = min(start - padding, 0)
-    end = max(end + padding, total_length)
+    start = max(start - padding, 0)
+    end = min(end + padding, total_length)
 
     return start, end
 

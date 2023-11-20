@@ -85,7 +85,7 @@ def delete_data():
         db.rollback()
         return jsonify(success=False, error=str(e))
     
-@app.route('/write_results_to_file', methods=['POST'])
+@app.route('/write_log_to_file', methods=['POST'])
 def write_to_file():
     data = request.json
     file_name = data.get('file_name')

@@ -4,8 +4,8 @@ import numpy as np
 from flask import Flask, request, jsonify
 
 from ..configs import config
-from ..utils.model_loader import ModelLoader
-from ..utils import utils
+from ..tools.model_loader import ModelLoader
+from ..tools import utils
 
 app = Flask(__name__)
 
