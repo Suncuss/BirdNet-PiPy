@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request
 from faker import Faker
+from faker.providers import BaseProvider
 import random
 from datetime import datetime, timedelta
 from flask_cors import CORS
@@ -16,9 +17,29 @@ CORS(app)  # This will enable CORS for all routes
 fake = Faker()
 
 
+# Define a list of bird names
+bird_names = [
+    "Northern Cardinal", "American Robin", "Blue Jay", "Mourning Dove",
+    "Red-winged Blackbird", "House Sparrow", "European Starling",
+    "Song Sparrow", "House Finch", "Eastern Bluebird"
+]
+
+# Custom provider class for bird names
+
+
+class BirdProvider(BaseProvider):
+    def bird_name(self):
+        return random.choice(bird_names)
+
+
+# Add the custom provider to Faker
+fake.add_provider(BirdProvider)
+
+
 # Simple in-memory cache
 image_cache = {}
 CACHE_EXPIRATION = 3600  # Cache expiration time in seconds (1 hour)
+
 
 def get_cached_image(species_name):
     if species_name in image_cache:
@@ -28,11 +49,13 @@ def get_cached_image(species_name):
             return cached_data['url']
     return None
 
+
 def set_cached_image(species_name, image_url):
     image_cache[species_name] = {
         'url': image_url,
         'timestamp': time.time()
     }
+
 
 @lru_cache(maxsize=100)
 def fetch_wikimedia_image(species_name):
@@ -44,24 +67,27 @@ def fetch_wikimedia_image(species_name):
 
     try:
         # Search for the page
-        search_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={quote(species_name)}&format=json&origin=*"
+        search_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={
+            quote(species_name)}&format=json&origin=*"
         search_response = requests.get(search_url)
         search_response.raise_for_status()
         search_data = search_response.json()
-        
+
         if not search_data['query']['search']:
             return None, 'No results found'
-        
+
         page_title = search_data['query']['search'][0]['title']
 
         # Fetch the image
-        image_api_url = f"https://en.wikipedia.org/w/api.php?action=query&titles={quote(page_title)}&prop=pageimages&format=json&pithumbsize=500&origin=*"
+        image_api_url = f"https://en.wikipedia.org/w/api.php?action=query&titles={
+            quote(page_title)}&prop=pageimages&format=json&pithumbsize=500&origin=*"
         image_response = requests.get(image_api_url)
         image_response.raise_for_status()
         image_data = image_response.json()
 
         pages = image_data['query']['pages']
-        image_url = next(iter(pages.values())).get('thumbnail', {}).get('source')
+        image_url = next(iter(pages.values())).get(
+            'thumbnail', {}).get('source')
 
         if image_url:
             # Cache the result
@@ -72,52 +98,60 @@ def fetch_wikimedia_image(species_name):
 
     except requests.RequestException as e:
         return None, f'Error fetching Wikimedia image: {str(e)}'
-    
 
 
-def generate_featured_bird():
+def generate_latest_observation():
+    species = fake.bird_name()
+    image_url, _ = fetch_wikimedia_image(species)
     return {
-        'name': 'Eastern Bluebird',
-        'scientificName': 'Sialia sialis',
+        'name': species,
+        'scientificName': "Unknownus birdus",
         'audioUrl': '/test.wav',
-        'imageUrl': '/eb.jpeg'
+        'imageUrl': image_url or '/eb.jpeg',
+        'timestamp': datetime.now().isoformat()
     }
 
-def generate_recent_detections():
+
+def generate_recent_observations():
     return [
         {
             'id': i,
-            'species': fake.word(),
+            'species': fake.bird_name(),
             'timestamp': (datetime.now() - timedelta(minutes=15*i)).isoformat(),
             'confidence': round(random.uniform(0.8, 1.0), 2),
-            'audioUrl': f'https://example.com/{fake.word()}.mp3',
-            'spectrogramUrl': '/spg.png'
-        } for i in range(1, 4)
+            'audioUrl': f'/audio/{fake.bird_name().lower().replace(" ", "_")}.mp3',
+            'spectrogramUrl': f'/spectrogram/{fake.bird_name().lower().replace(" ", "_")}.png'
+        } for i in range(1, 6)  # Generating 5 recent observations
     ]
 
-def generate_detection_statistics():
+
+def generate_observation_summary():
     return {
         period: {
-            'totalDetections': random.randint(100, 10000),
+            'totalObservations': random.randint(100, 10000),
             'uniqueSpecies': random.randint(10, 100),
             'mostActiveHour': f"{random.randint(4, 8)} AM - {random.randint(5, 9)} AM",
-            'mostCommonBird': fake.word(),
-            'rarestBird': fake.word()
+            'mostCommonBird': fake.bird_name(),
+            'rarestBird': fake.bird_name()
         } for period in ['today', 'week', 'month', 'allTime']
     }
 
-def generate_hourly_detection_data():
+
+def generate_hourly_activity_data():
     return [
-        {'hour': f"{hour}{'am' if hour < 12 else 'pm'}", 'count': random.randint(0, 100)}
+        {'hour': f"{hour:02d}:00", 'count': random.randint(0, 100)}
         for hour in range(24)
     ]
 
-def generate_bird_detection_data(num_species=10):
-    birds = [fake.unique.word() for _ in range(num_species)]
+
+def generate_bird_activity_data(num_species=10):
+    fake = Faker()
+    fake.add_provider(BirdProvider)
+    birds = [fake.unique.bird_name() for _ in range(num_species)]
     bird_data = []
 
     for species in birds:
-        hourly_detections = [0] * 24
+        hourly_activity = [0] * 24
         earliest_possible_activity = random.randint(4, 6)
         latest_possible_activity = random.randint(18, 21)
 
@@ -142,48 +176,47 @@ def generate_bird_detection_data(num_species=10):
             for i in range(-1, burst_duration + 1):
                 activity_hour = hour + i
                 if active_start <= activity_hour <= active_end:
-                    hourly_detections[activity_hour] += random.randint(5, 20)
+                    hourly_activity[activity_hour] += random.randint(5, 20)
 
         ramp_duration = random.randint(1, 3)
         for hour in range(active_start, active_start + ramp_duration):
-            hourly_detections[hour] += random.randint(1, 5) * (hour - active_start + 1)
+            hourly_activity[hour] += random.randint(1, 5) * (hour - active_start + 1)
         for hour in range(active_end - ramp_duration + 1, active_end + 1):
-            hourly_detections[hour] += random.randint(1, 5) * (active_end - hour + 1)
+            hourly_activity[hour] += random.randint(1, 5) * (active_end - hour + 1)
 
         for hour in range(active_start, active_end + 1):
-            hourly_detections[hour] += random.randint(0, 3)
+            hourly_activity[hour] += random.randint(0, 3)
 
         bird_data.append({
             'species': species,
-            'hourlyDetections': hourly_detections,
-            'totalDetections': sum(hourly_detections),
+            'hourlyActivity': hourly_activity,
+            'totalObservations': sum(hourly_activity),
             'activeStart': active_start,
             'activeEnd': active_end
         })
 
-    bird_data.sort(key=lambda x: x['totalDetections'], reverse=True)
+    bird_data.sort(key=lambda x: x['totalObservations'], reverse=True)
     return bird_data
 
+@app.route('/api/observation/latest', methods=['GET'])
+def get_latest_observation():
+    return jsonify(generate_latest_observation())
 
-@app.route('/api/featured_bird', methods=['GET'])
-def get_featured_bird():
-    return jsonify(generate_featured_bird())
+@app.route('/api/observations/recent', methods=['GET'])
+def get_recent_observations():
+    return jsonify(generate_recent_observations())
 
-@app.route('/api/recent_detections', methods=['GET'])
-def get_recent_detections():
-    return jsonify(generate_recent_detections())
+@app.route('/api/summary/stats', methods=['GET'])
+def get_observation_summary():
+    return jsonify(generate_observation_summary())
 
-@app.route('/api/detection_statistics', methods=['GET'])
-def get_detection_statistics():
-    return jsonify(generate_detection_statistics())
+@app.route('/api/activity/hourly', methods=['GET'])
+def get_hourly_activity():
+    return jsonify(generate_hourly_activity_data())
 
-@app.route('/api/hourly_detection_data', methods=['GET'])
-def get_hourly_detection_data():
-    return jsonify(generate_hourly_detection_data())
-
-@app.route('/api/detail_bird_detection_data', methods=['GET'])
-def get_detail_bird_detection_data():
-    return jsonify(generate_bird_detection_data(10))
+@app.route('/api/activity/overview', methods=['GET'])
+def get_activity_overview():
+    return jsonify(generate_bird_activity_data(10))
 
 @app.route('/api/wikimedia_image', methods=['GET'])
 def get_wikimedia_image():
@@ -195,7 +228,6 @@ def get_wikimedia_image():
     if error:
         return jsonify({'error': error}), 404 if 'No results found' in error else 500
     return jsonify({'imageUrl': image_url})
-
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5001)
