@@ -103,27 +103,30 @@ def fetch_wikimedia_image(species_name):
 def generate_latest_observation():
     species = fake.bird_name()
     image_url, _ = fetch_wikimedia_image(species)
+    audio_options = ['/sound/A.wav', '/sound/B.wav', '/sound/C.wav', '/sound/D.wav']
     return {
         'name': species,
         'scientificName': "Unknownus birdus",
-        'audioUrl': '/test.wav',
+        'audioUrl': random.choice(audio_options),
         'imageUrl': image_url or '/eb.jpeg',
         'timestamp': datetime.now().isoformat()
     }
 
 
 def generate_recent_observations():
+    audio_options = ['/sound/A.wav', '/sound/B.wav', '/sound/C.wav', '/sound/D.wav']
+    spectrogram_options = ['/spectrogram/A.png', '/spectrogram/B.png', '/spectrogram/C.png', '/spectrogram/D.png']
+
     return [
         {
             'id': i,
             'species': fake.bird_name(),
-            'timestamp': (datetime.now() - timedelta(minutes=15*i)).isoformat(),
+            'timestamp': (datetime.now() - timedelta(minutes=15 * i)).isoformat(),
             'confidence': round(random.uniform(0.8, 1.0), 2),
-            'audioUrl': f'/audio/{fake.bird_name().lower().replace(" ", "_")}.mp3',
-            'spectrogramUrl': f'/spectrogram/{fake.bird_name().lower().replace(" ", "_")}.png'
-        } for i in range(1, 6)  # Generating 5 recent observations
+            'audioUrl': random.choice(audio_options),
+            'spectrogramUrl': random.choice(spectrogram_options)
+        } for i in range(1, 9)  # Generating 5 recent observations
     ]
-
 
 def generate_observation_summary():
     return {
