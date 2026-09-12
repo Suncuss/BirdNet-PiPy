@@ -82,6 +82,19 @@ def test_runtime_migration_is_read_only(settings_file):
     assert path.read_text() == original
 
 
+def test_values_outside_current_rules_still_load_but_wrong_shapes_do_not(settings_file, capsys):
+    path, runtime = settings_file
+    # Equal percentages were accepted before the ordering rule existed; a
+    # station must not stop over them (see the 2026-09-12 staging outage).
+    path.write_text('{"storage":{"trigger_percent":70,"target_percent":70}}')
+    saved = runtime.get_runtime_settings(force_reload=True, strict=True)
+    assert (saved['storage']['trigger_percent'], saved['storage']['target_percent']) == (70, 70)
+    assert 'storage.target_percent must be less than trigger_percent' in capsys.readouterr().out
+    path.write_text('{"storage":{"trigger_percent":"70"}}')
+    with pytest.raises(ValueError):
+        runtime.get_runtime_settings(force_reload=True, strict=True)
+
+
 def test_legacy_display_and_channel_values_are_migrated_before_validation(settings_file):
     path, runtime = settings_file
     path.write_text('{"updates":{"channel":"stable"},"display":{"time_format":"auto"}}')

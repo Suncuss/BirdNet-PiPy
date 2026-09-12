@@ -11,8 +11,13 @@ from config.constants import (
 )
 
 
-def validate_settings(settings, *, partial=False):
-    """Return a user-facing error, or None. Accept partial documents too."""
+def validate_settings_shape(settings):
+    """Types and structure only: the errors that make a document unusable.
+
+    Value rules live in validate_settings. A loader treats only shape errors
+    as fatal, because a file an older version wrote may break a value rule
+    added since, and that is for the user to fix under Settings.
+    """
     from config.settings import DEFAULT_SETTINGS
 
     def shape(value, default, path=''):
@@ -44,7 +49,12 @@ def validate_settings(settings, *, partial=False):
             return f'{path} must be a string'
         return None
 
-    error = shape(settings, DEFAULT_SETTINGS)
+    return shape(settings, DEFAULT_SETTINGS)
+
+
+def validate_settings(settings, *, partial=False):
+    """Return a user-facing error, or None. Accept partial documents too."""
+    error = validate_settings_shape(settings)
     if error:
         return error
 
