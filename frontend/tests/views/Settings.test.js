@@ -1,13 +1,16 @@
 import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import Settings from '@/views/Settings.vue'
-import { RECORDER_STATES } from '@/utils/recorderStates'
+import { useRecorderHealth } from '@/composables/useRecorderHealth'
+import { useSettings } from '@/composables/useSettings'
+import { acceptSettingsRevision } from '@/services/settingsWrites'
 
 const socketHandlers = vi.hoisted(() => ({}))
 const socketOnMock = vi.hoisted(() => vi.fn((event, handler) => {
   socketHandlers[event] = handler
 }))
 const socketDisconnectMock = vi.hoisted(() => vi.fn())
+const socketEmitMock = vi.hoisted(() => vi.fn())
 
 // Mock the api service
 const mockApi = vi.hoisted(() => ({
@@ -24,6 +27,8 @@ vi.mock('@/services/api', () => ({
 const ioMock = vi.hoisted(() => vi.fn(() => ({
   on: socketOnMock,
   once: socketOnMock,
+  emit: socketEmitMock,
+  connected: true,
   disconnect: socketDisconnectMock
 })))
 
@@ -73,7 +78,7 @@ vi.mock('@/composables/useSystemUpdate', () => ({
 }))
 
 enableAutoUnmount(afterEach)
-afterEach(() => { document.body.style.overflow = '' })
+afterEach(() => { useRecorderHealth().disconnect(); document.body.style.overflow = '' })
 
 // Mock the useAuth composable to avoid extra fetch calls
 vi.mock('@/composables/useAuth', () => ({
@@ -86,9 +91,10 @@ vi.mock('@/composables/useAuth', () => ({
     checkAuthStatus: vi.fn().mockResolvedValue(undefined),
     ensureAuthLoaded: vi.fn().mockResolvedValue(undefined),
     login: vi.fn().mockResolvedValue(true),
-    logout: vi.fn().mockResolvedValue(undefined),
+    logout: vi.fn().mockResolvedValue(true),
     setup: vi.fn().mockResolvedValue(true),
     toggleAuth: vi.fn().mockResolvedValue(true),
+    saveAccessSettings: vi.fn().mockResolvedValue(true),
     changePassword: vi.fn().mockResolvedValue(true),
     clearError: vi.fn()
   })
@@ -101,8 +107,10 @@ const mockSettings = {
   },
   detection: {
     sensitivity: 0.75,
-    cutoff: 0.60
+    cutoff: 0.60,
+    species_filter_threshold: 0.03
   },
+  species_filter: { allowed_species: [], blocked_species: [], included_species: [] },
   audio: {
     sources: [
       { id: 'source_0', type: 'pulseaudio', device: 'default', label: 'Microphone', enabled: true }
@@ -127,6 +135,7 @@ const mockSettings = {
     language: 'en'
   },
   notifications: {
+    apprise_urls: [],
     enabled: false,
     apprise_url: null,
     every_detection: true,
@@ -146,6 +155,9 @@ const mockSettings = {
   updates: {
     channel: 'release'
   },
+  schedule: {
+    quiet_hours: { enabled: false, start: '22:00', end: '06:00' }
+  },
   storage: {
     auto_cleanup_enabled: true,
     trigger_percent: 85,
@@ -162,6 +174,14 @@ const mockSettings = {
 
 const createMockSettings = () => structuredClone(mockSettings)
 
+const defaultStatus = () => ({
+  recording: 'current', streaming: 'current',
+  sources: { source_0: { recording: 'active', streaming: 'active' } },
+  model: { state: 'active' },
+  model_service: { status: 'ok', location_filter: { state: 'active', source: 'meta_model_v2.4', version: '2.4' } }
+})
+const setStatus = status => { useRecorderHealth().settingsStatus.value = status }
+
 const defaultGetResponse = (url) => {
   if (url === '/settings' || url === '/settings/defaults') {
     return Promise.resolve({ data: createMockSettings() })
@@ -175,20 +195,6 @@ const defaultGetResponse = (url) => {
   if (url === '/recorder/status') {
     return Promise.resolve({ data: {} })
   }
-  if (url === '/model/status') {
-    return Promise.resolve({
-      data: {
-        status: 'ok',
-        location_filter: {
-          state: 'active',
-          source: 'meta_model_v2.4',
-          version: '2.4',
-          code: null,
-          message: null
-        }
-      }
-    })
-  }
   return Promise.resolve({ data: {} })
 }
 
@@ -200,15 +206,34 @@ const mountSettings = () => mount(Settings, {
   }
 })
 
+// Make GET /settings hang until the returned release() is called, so a test
+// can observe the form's pre-load (skeleton) state. Other URLs fall through
+// to the defaults.
+const deferSettingsFetch = (payload = createMockSettings()) => {
+  let release
+  mockApi.get.mockImplementation((url) =>
+    url === '/settings'
+      ? new Promise((resolve) => { release = () => resolve({ data: structuredClone(payload) }) })
+      : defaultGetResponse(url)
+  )
+  return () => release()
+}
+
 describe('Settings', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // Recorder status lives in the useRecorderHealth singleton — clear it so
+    // one test's status can't leak into the next.
+    useRecorderHealth().disconnect()
+    setStatus(defaultStatus())
+    useSettings().resetState()
     Object.keys(socketHandlers).forEach((key) => delete socketHandlers[key])
     socketOnMock.mockClear()
     socketDisconnectMock.mockClear()
     ioMock.mockClear()
     mockApi.get.mockReset()
     mockApi.put.mockReset()
+    mockApi.put.mockResolvedValue({ data: { status: 'updated' } })
     mockApi.post.mockReset()
     mockWaitForRestart.mockReset()
     mockWaitForRestart.mockResolvedValue(true)
@@ -226,6 +251,173 @@ describe('Settings', () => {
   })
 
   describe('Loading Settings', () => {
+    it.each(['settings', 'status'])('shows the appropriate skeleton when %s arrives first', async (first) => {
+      setStatus(null)
+      useRecorderHealth().connect()
+      const releaseSettings = deferSettingsFetch()
+      const wrapper = mountSettings()
+      await flushPromises()
+      expect(wrapper.find('[data-testid="settings-skeleton"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="audio-status-skeleton"]').exists()).toBe(false)
+
+      if (first === 'status') socketHandlers.settings_status(defaultStatus())
+      else releaseSettings()
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('Audio Status Unavailable')
+      expect(wrapper.text()).not.toContain('Saved settings loaded.')
+
+      if (first === 'settings') {
+        expect(wrapper.find('[data-testid="settings-skeleton"]').exists()).toBe(false)
+        expect(wrapper.find('[data-testid="audio-status-skeleton"]').exists()).toBe(true)
+        expect(wrapper.get('[data-testid="audio-status-summary"]').attributes('aria-busy')).toBe('true')
+        expect(wrapper.get('fieldset').element.disabled).toBe(false)
+        await wrapper.get('#latitude').setValue('45')
+        socketHandlers.settings_status(defaultStatus())
+      } else {
+        expect(wrapper.find('[data-testid="settings-skeleton"]').exists()).toBe(true)
+        releaseSettings()
+      }
+      await flushPromises()
+      expect(wrapper.find('[data-testid="settings-skeleton"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="audio-status-skeleton"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Healthy')
+      expect(wrapper.get('[data-testid="audio-status-summary"]').attributes('aria-busy')).toBe('false')
+      if (first === 'settings') {
+        expect(wrapper.vm.settings.location.latitude).toBe(45)
+        expect(wrapper.vm.hasUnsavedChanges).toBe(true)
+      }
+    })
+
+    it('asks for a fresh status on return visits instead of showing the last one', async () => {
+      useSettings().setSettings(createMockSettings())
+      useRecorderHealth().connect()
+      const first = mountSettings()
+      socketHandlers.settings_status(defaultStatus())
+      await flushPromises()
+      expect(first.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Healthy')
+      first.unmount()
+      const reopened = mountSettings()
+      await reopened.vm.$nextTick()
+      expect(reopened.find('[data-testid="settings-skeleton"]').exists()).toBe(false)
+      expect(reopened.find('[data-testid="audio-status-skeleton"]').exists()).toBe(true)
+      expect(reopened.text()).not.toContain('Saved settings loaded.')
+      socketHandlers.settings_status(defaultStatus())
+      await flushPromises()
+      expect(reopened.find('[data-testid="audio-status-skeleton"]').exists()).toBe(false)
+      expect(reopened.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Healthy')
+    })
+
+    it.each(['active', 'unknown'])('shows audio promptly while model health loads, then reports model %s', async (modelState) => {
+      useRecorderHealth().connect()
+      socketHandlers.settings_status({
+        ...defaultStatus(), model: { state: 'unknown' }, model_service: { status: 'loading' }
+      })
+      const wrapper = mountSettings()
+      await flushPromises()
+      expect(wrapper.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Healthy')
+      expect(wrapper.find('[data-testid="audio-status-skeleton"]').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('Saved settings loaded.')
+
+      socketHandlers.settings_status({
+        ...defaultStatus(), model: { state: modelState },
+        model_service: modelState === 'active' ? defaultStatus().model_service : {}
+      })
+      await flushPromises()
+      expect(wrapper.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Healthy')
+      expect(wrapper.text().includes('Saved settings loaded.')).toBe(modelState === 'unknown')
+    })
+
+    it.each(['timeout', 'disconnect', 'unavailable snapshot'])('replaces the initial skeleton with real unavailability on %s', async (failure) => {
+      vi.useFakeTimers()
+      try {
+        setStatus(null)
+        useRecorderHealth().connect()
+        const wrapper = mountSettings()
+        await flushPromises()
+        expect(wrapper.find('[data-testid="audio-status-skeleton"]').exists()).toBe(true)
+        if (failure === 'timeout') await vi.advanceTimersByTimeAsync(15000)
+        else if (failure === 'disconnect') socketHandlers.disconnect()
+        else socketHandlers.settings_status(null)
+        await flushPromises()
+        expect(wrapper.find('[data-testid="audio-status-skeleton"]').exists()).toBe(false)
+        expect(wrapper.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Status Unavailable')
+        expect(wrapper.get('fieldset').element.disabled).toBe(false)
+        socketHandlers.settings_status(defaultStatus())
+        await flushPromises()
+        expect(wrapper.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Healthy')
+      } finally {
+        useRecorderHealth().disconnect()
+        vi.useRealTimers()
+      }
+    })
+
+    it('shows active audio status with a gzip-weakened settings ETag', async () => {
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: createMockSettings(), headers: { etag: 'W/"saved"' } })
+        : defaultGetResponse(url))
+      setStatus({ ...defaultStatus(), revision: '"saved"' })
+      const wrapper = mountSettings()
+      await flushPromises()
+      expect(wrapper.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Healthy')
+    })
+
+    it('keeps the saved model pending after restart fails and on a fresh page', async () => {
+      const saved = createMockSettings()
+      saved.model.type = 'birdnet_v3'
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: structuredClone(saved) }) : defaultGetResponse(url))
+      setStatus({ ...defaultStatus(), model: {
+        requested: 'birdnet_v3', active: 'birdnet', state: 'restart_required', restart_required: true
+      } })
+      const wrapper = mountSettings()
+      await flushPromises()
+      expect(wrapper.vm.hasUnsavedChanges).toBe(false)
+      expect(wrapper.find('[data-testid="settings-pending-restart"]').text()).toContain('Active: BirdNET v2.4')
+      mockRequestRestart.mockRejectedValueOnce(new Error('restart unavailable'))
+      await wrapper.vm.manualRestart()
+      expect(wrapper.find('[data-testid="settings-pending-restart"]').exists()).toBe(true)
+      wrapper.unmount()
+      const reopened = mountSettings()
+      await flushPromises()
+      setStatus({ ...defaultStatus(), model: {
+        requested: 'birdnet_v3', active: 'birdnet', state: 'restart_required', restart_required: true
+      } })
+      await flushPromises()
+      expect(reopened.find('[data-testid="settings-pending-restart"]').exists()).toBe(true)
+    })
+
+    it('reports streaming failure separately from healthy recording', async () => {
+      setStatus({ ...defaultStatus(), sources: { source_0: { recording: 'active', streaming: 'failed' } } })
+      const wrapper = mountSettings()
+      await flushPromises()
+      expect(wrapper.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Issue — Microphone')
+      await wrapper.get('[data-source-id="source_0"]').trigger('click')
+      expect(wrapper.findAll('[data-testid="source-audio-details"] dd').map(row => row.text()))
+        .toEqual(['Active', 'Failed'])
+    })
+
+    it('reports unavailable service status even when saved settings have a revision', async () => {
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: createMockSettings(), headers: { etag: 'saved-revision' } }) : defaultGetResponse(url))
+      setStatus(null)
+      useRecorderHealth().connect()
+      const wrapper = mountSettings()
+      socketHandlers.settings_status(null)
+      await flushPromises()
+      expect(wrapper.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Status Unavailable')
+    })
+
+    it('keeps pending source removal visible after the source leaves the saved list', async () => {
+      const saved = createMockSettings()
+      saved.audio.sources = []
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: saved }) : defaultGetResponse(url))
+      setStatus({ ...defaultStatus(), sources: {}, recording: 'pending', streaming: 'pending' })
+      const wrapper = mountSettings()
+      await flushPromises()
+      expect(wrapper.find('[data-testid="source-application-status"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="audio-status-summary"]').text()).toBe('Updating Status…')
+    })
     it('loads settings from API on mount', async () => {
       const wrapper = mountSettings()
       await flushPromises()
@@ -235,35 +427,157 @@ describe('Settings', () => {
       expect(wrapper.vm.settings.audio.overlap).toBe(0.0)
     })
 
-    it('loads model and location-filter status on mount', async () => {
+    it('shows a skeleton until the first payload lands, not empty-state text', async () => {
+      // Cold store: clear the shared singleton so nothing seeds the form, and
+      // hold the /settings response so the form stays in its pre-load state.
+      useSettings().resetState()
+      const releaseSettings = deferSettingsFetch()
+
       const wrapper = mountSettings()
+      await wrapper.vm.$nextTick()
+
+      // Before data: skeleton visible, form body gated, no misleading pause hint.
+      expect(wrapper.vm.loaded).toBe(false)
+      expect(wrapper.find('[data-testid="settings-skeleton"]').exists()).toBe(true)
+      expect(wrapper.vm.noActiveSourceHint).toBe('')
+      expect(wrapper.find('[data-testid="no-active-source-hint"]').exists()).toBe(false)
+
+      releaseSettings()
       await flushPromises()
 
-      expect(mockApi.get).toHaveBeenCalledWith('/model/status')
-      expect(wrapper.vm.modelStatus.location_filter.state).toBe('active')
-      expect(wrapper.find('[data-testid="location-filter-warning"]').exists()).toBe(false)
+      // After data: skeleton gone, real form rendered.
+      expect(wrapper.vm.loaded).toBe(true)
+      expect(wrapper.find('[data-testid="settings-skeleton"]').exists()).toBe(false)
+      expect(wrapper.text()).toContain('Microphone')
+    })
+
+    it('seeds the form synchronously from an already-loaded store (no flash)', async () => {
+      // Warm store (the common navigation case): App.vue loaded it earlier.
+      const store = useSettings()
+      store.resetState()
+      store.setSettings(createMockSettings())
+
+      // Hold the background revalidation so the seed is the ONLY thing that
+      // can populate the form.
+      const releaseSettings = deferSettingsFetch()
+
+      const wrapper = mountSettings()
+      // loaded flips true during onMounted, before any network resolves.
+      expect(wrapper.vm.loaded).toBe(true)
+
+      // DOM reflects the seed on the next tick — no await on the fetch.
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('[data-testid="settings-skeleton"]').exists()).toBe(false)
+      expect(wrapper.text()).toContain('Microphone')
+
+      releaseSettings()
+      await flushPromises()
+    })
+
+    it('does not overwrite warm-form edits when background revalidation finishes', async () => {
+      const store = useSettings()
+      const cached = createMockSettings()
+      cached.display.station_name = 'Cached station'
+      store.setSettings(cached)
+
+      const refreshed = createMockSettings()
+      refreshed.display.station_name = 'Server station'
+      const releaseSettings = deferSettingsFetch(refreshed)
+      const wrapper = mountSettings()
+
+      wrapper.vm.settings.display.station_name = 'Unsaved edit'
+      await wrapper.vm.$nextTick()
+      expect(wrapper.vm.hasUnsavedChanges).toBe(true)
+
+      releaseSettings()
+      await flushPromises()
+
+      expect(wrapper.vm.settings.display.station_name).toBe('Unsaved edit')
+      expect(wrapper.vm.hasUnsavedChanges).toBe(true)
+      expect(store.settings.value.display.station_name).toBe('Server station')
+    })
+
+    it('keeps warm cached settings when background revalidation exhausts its retries', async () => {
+      vi.useFakeTimers()
+      try {
+        const cached = createMockSettings()
+        cached.display.station_name = 'Known-good station'
+        useSettings().setSettings(cached)
+        mockApi.get.mockImplementation((url) =>
+          url === '/settings'
+            ? Promise.reject(new Error('settings unavailable'))
+            : defaultGetResponse(url)
+        )
+
+        const wrapper = mountSettings()
+        await flushPromises()
+        await vi.advanceTimersByTimeAsync(2000)
+        await flushPromises()
+        await vi.advanceTimersByTimeAsync(2000)
+        await flushPromises()
+
+        expect(wrapper.vm.settings.display.station_name).toBe('Known-good station')
+        expect(wrapper.vm.saveStatus).toEqual({
+          type: 'error',
+          message: 'Could not refresh settings. Showing last loaded settings.'
+        })
+        expect(mockApi.get).not.toHaveBeenCalledWith('/settings/defaults')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('keeps editing disabled when a cold load exhausts its retries', async () => {
+      vi.useFakeTimers()
+      try {
+        const defaults = createMockSettings()
+        defaults.display.station_name = 'Default station'
+        mockApi.get.mockImplementation((url) => {
+          if (url === '/settings') return Promise.reject(new Error('settings unavailable'))
+          if (url === '/settings/defaults') return Promise.resolve({ data: defaults })
+          return defaultGetResponse(url)
+        })
+
+        const wrapper = mountSettings()
+        await flushPromises()
+        await vi.advanceTimersByTimeAsync(2000)
+        await flushPromises()
+        await vi.advanceTimersByTimeAsync(2000)
+        await flushPromises()
+
+        expect(mockApi.get).not.toHaveBeenCalledWith('/settings/defaults')
+        expect(wrapper.vm.loaded).toBe(false)
+        expect(wrapper.vm.loadError).toContain('could not be loaded')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('uses shared model status without starting a status poll', async () => {
+      vi.useFakeTimers()
+      try {
+        useRecorderHealth().connect()
+        const wrapper = mountSettings()
+        await flushPromises()
+        for (let elapsed = 0; elapsed < 30000; elapsed += 5000) {
+          socketHandlers.settings_status(defaultStatus())
+          await vi.advanceTimersByTimeAsync(5000)
+        }
+        expect(mockApi.get).not.toHaveBeenCalledWith('/settings/status')
+        expect(wrapper.vm.modelStatus.location_filter.state).toBe('active')
+        expect(wrapper.find('[data-testid="location-filter-warning"]').exists()).toBe(false)
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('shows a persistent warning when location filtering is degraded', async () => {
-      mockApi.get.mockImplementation((url) => {
-        if (url !== '/model/status') return defaultGetResponse(url)
-        return Promise.resolve({
-          data: {
-            status: 'degraded',
-            location_filter: {
-              state: 'degraded',
-              source: 'disabled',
-              version: null,
-              code: 'geomodel_validation_failed',
-              message: 'Location filtering failed to start. Acoustic detections are continuing without location filtering; check System Logs for details.'
-            }
-          }
-        })
-      })
-
+      setStatus({ ...defaultStatus(), model_service: { status: 'degraded', location_filter: {
+        state: 'degraded', source: 'disabled', code: 'geomodel_validation_failed',
+        message: 'Location filtering failed to start. Acoustic detections are continuing without location filtering; check System Logs for details.'
+      } } })
       const wrapper = mountSettings()
       await flushPromises()
-
       const warning = wrapper.find('[data-testid="location-filter-warning"]')
       expect(warning.exists()).toBe(true)
       expect(warning.text()).toContain('Acoustic detections are continuing without location filtering')
@@ -271,105 +585,75 @@ describe('Settings', () => {
     })
 
     it('does not render intentionally disabled filtering as an error', async () => {
-      mockApi.get.mockImplementation((url) => {
-        if (url !== '/model/status') return defaultGetResponse(url)
-        return Promise.resolve({
-          data: {
-            status: 'ok',
-            location_filter: {
-              state: 'disabled',
-              source: 'disabled',
-              message: 'Location filtering is disabled.'
-            }
-          }
-        })
-      })
-
+      setStatus({ ...defaultStatus(), model_service: { status: 'ok', location_filter: {
+        state: 'disabled', source: 'disabled', message: 'Location filtering is disabled.'
+      } } })
       const wrapper = mountSettings()
       await flushPromises()
-
       expect(wrapper.find('[data-testid="location-filter-warning"]').exists()).toBe(false)
     })
 
-    it('rechecks a temporarily unavailable model service and clears the warning', async () => {
-      vi.useFakeTimers()
-      let statusCalls = 0
-      mockApi.get.mockImplementation((url) => {
-        if (url !== '/model/status') return defaultGetResponse(url)
-        statusCalls += 1
-        if (statusCalls === 1) {
-          return Promise.resolve({
-            data: {
-              status: 'unavailable',
-              location_filter: {
-                state: 'unavailable',
-                source: 'disabled',
-                message: 'Model service status is unavailable.'
-              }
-            }
-          })
-        }
-        return defaultGetResponse(url)
-      })
-
+    it('updates model recovery and restart acknowledgement from socket snapshots', async () => {
+      useRecorderHealth().connect()
+      socketHandlers.settings_status({ ...defaultStatus(), model: { state: 'unknown' }, model_service: {
+        status: 'unavailable', location_filter: { state: 'unavailable', message: 'Model service status is unavailable.' }
+      } })
       const wrapper = mountSettings()
       await flushPromises()
       expect(wrapper.text()).toContain('Model service status is unavailable.')
-
-      await vi.advanceTimersByTimeAsync(5000)
+      expect(wrapper.text()).toContain('Waiting for services to report the active model.')
+      socketHandlers.settings_status(defaultStatus())
       await flushPromises()
-
-      expect(statusCalls).toBe(2)
       expect(wrapper.find('[data-testid="location-filter-warning"]').exists()).toBe(false)
-      vi.useRealTimers()
+      expect(wrapper.text()).not.toContain('Waiting for services to report the active model.')
+      expect(mockApi.get).not.toHaveBeenCalledWith('/settings/status')
     })
 
-    it('retries after a transient model-status fetch failure', async () => {
-      vi.useFakeTimers()
-      let statusCalls = 0
-      mockApi.get.mockImplementation((url) => {
-        if (url !== '/model/status') return defaultGetResponse(url)
-        statusCalls += 1
-        if (statusCalls === 1) return Promise.reject(new Error('nginx restarting'))
-        return defaultGetResponse(url)
-      })
-
+    it('does not show model health from a different settings revision', async () => {
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: createMockSettings(), headers: { etag: '"new"' } }) : defaultGetResponse(url))
       const wrapper = mountSettings()
       await flushPromises()
-      expect(statusCalls).toBe(1)
-
-      await vi.advanceTimersByTimeAsync(5000)
+      setStatus({ ...defaultStatus(), revision: '"old"', model: { state: 'restart_required', restart_required: true } })
       await flushPromises()
-
-      expect(statusCalls).toBe(2)
+      expect(wrapper.vm.modelStatus).toBeNull()
+      expect(wrapper.find('[data-testid="settings-pending-restart"]').exists()).toBe(false)
+      setStatus({ ...defaultStatus(), revision: '"new"' })
+      await flushPromises()
       expect(wrapper.vm.modelStatus.location_filter.state).toBe('active')
-      vi.useRealTimers()
     })
 
-    it('does not schedule polling when an in-flight fetch resolves after unmount', async () => {
-      vi.useFakeTimers()
-      let resolveStatus
-      let statusCalls = 0
-      mockApi.get.mockImplementation((url) => {
-        if (url !== '/model/status') return defaultGetResponse(url)
-        statusCalls += 1
-        return new Promise((resolve) => { resolveStatus = resolve })
-      })
-
+    it('refreshes settings when another session changes the saved revision', async () => {
+      let etag = '"local"'
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: createMockSettings(), headers: { etag } }) : defaultGetResponse(url))
       const wrapper = mountSettings()
-      await Promise.resolve()
-      wrapper.unmount()
-      resolveStatus({
-        data: {
-          status: 'unavailable',
-          location_filter: { state: 'unavailable', source: 'disabled' }
-        }
-      })
       await flushPromises()
-      await vi.advanceTimersByTimeAsync(5000)
+      mockApi.get.mockClear()
+      etag = '"remote"'
+      setStatus({ ...defaultStatus(), revision: '"remote"' })
+      await flushPromises()
+      expect(mockApi.get).toHaveBeenCalledWith('/settings')
+      expect(wrapper.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Healthy')
+    })
 
-      expect(statusCalls).toBe(1)
-      vi.useRealTimers()
+    it('does not refetch for a status still on the revision this tab just saved past', async () => {
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: createMockSettings(), headers: { etag: '"before"' } }) : defaultGetResponse(url))
+      const wrapper = mountSettings()
+      await flushPromises()
+      // A save moves the store on; the monitor's next sample may still carry the old revision.
+      acceptSettingsRevision({ headers: { etag: 'W/"after"' } })
+      useSettings().revision.value = '"after"'
+      mockApi.get.mockClear()
+      setStatus({ ...defaultStatus(), revision: '"before"' })
+      await flushPromises()
+      expect(mockApi.get).not.toHaveBeenCalledWith('/settings')
+      expect(wrapper.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Status Unavailable')
+      setStatus({ ...defaultStatus(), revision: '"after"' })
+      await flushPromises()
+      expect(mockApi.get).not.toHaveBeenCalledWith('/settings')
+      expect(wrapper.get('[data-testid="audio-status-summary"]').text()).toBe('Audio Healthy')
     })
 
     it('retries loading settings on failure', async () => {
@@ -407,62 +691,16 @@ describe('Settings', () => {
   })
 
   describe('Recording Settings Section', () => {
-    it('loads recorder status on mount', async () => {
-      mockApi.get.mockImplementation((url) => {
-        if (url === '/settings' || url === '/settings/defaults') {
-          return Promise.resolve({ data: createMockSettings() })
-        }
-        if (url === '/species/available') {
-          return Promise.resolve({ data: { species: [], total: 0, filtered: 0 } })
-        }
-        if (url === '/system/storage') {
-          return Promise.resolve({ data: {} })
-        }
-        if (url === '/recorder/status') {
-          return Promise.resolve({
-            data: {
-              state: RECORDER_STATES.RUNNING,
-              sources: {
-                source_0: {
-                  label: 'Microphone',
-                  type: 'pulseaudio',
-                  state: RECORDER_STATES.RUNNING
-                }
-              }
-            }
-          })
-        }
-        return Promise.resolve({ data: {} })
-      })
-
+    it('watches settings status only while mounted', async () => {
+      useRecorderHealth().connect()
+      socketEmitMock.mockClear()
       const wrapper = mountSettings()
       await flushPromises()
-
-      expect(mockApi.get).toHaveBeenCalledWith('/recorder/status')
-      expect(wrapper.vm.recorderStatus.state).toBe(RECORDER_STATES.RUNNING)
-    })
-
-    it('initializes socket.io with the base-path-aware socket.io path', async () => {
-      mountSettings()
-      await flushPromises()
-
-      expect(ioMock).toHaveBeenCalledWith({ path: '/socket.io' })
-    })
-
-    it('falls back to recorder status REST call when the socket connection fails', async () => {
-      const wrapper = mountSettings()
-      await flushPromises()
-
-      expect(socketHandlers.connect_error).toBeTypeOf('function')
-
-      socketHandlers.connect_error(new Error('origin mismatch'))
-      await flushPromises()
-
-      const recorderStatusCalls = mockApi.get.mock.calls
-        .filter(([url]) => url === '/recorder/status')
-      expect(recorderStatusCalls).toHaveLength(2)
-
+      expect(mockApi.get).not.toHaveBeenCalledWith('/recorder/status')
+      expect(mockApi.get).not.toHaveBeenCalledWith('/settings/status')
+      expect(socketEmitMock).toHaveBeenCalledWith('watch_settings_status')
       wrapper.unmount()
+      expect(socketEmitMock).toHaveBeenCalledWith('unwatch_settings_status')
     })
 
     it('displays recording settings within Detection section', async () => {
@@ -476,50 +714,42 @@ describe('Settings', () => {
       const wrapper = mountSettings()
       await flushPromises()
 
-      const select = wrapper.find('#recordingLength')
-      expect(select.exists()).toBe(true)
+      const trigger = wrapper.find('button#recordingLength')
+      expect(trigger.exists()).toBe(true)
 
-      const options = select.findAll('option')
-      expect(options).toHaveLength(3)
-      expect(options[0].attributes('value')).toBe('9')
-      expect(options[1].attributes('value')).toBe('12')
-      expect(options[2].attributes('value')).toBe('15')
-      expect(options[0].text()).toBe('9 seconds')
-      expect(options[1].text()).toBe('12 seconds')
-      expect(options[2].text()).toBe('15 seconds')
+      const options = [...trigger.element.parentElement.querySelectorAll('li[role="option"]')]
+      expect(options.map(o => o.textContent.trim())).toEqual([
+        '9 seconds', '12 seconds', '15 seconds'
+      ])
     })
 
     it('shows overlap dropdown with correct options', async () => {
       const wrapper = mountSettings()
       await flushPromises()
 
-      const select = wrapper.find('#overlap')
-      expect(select.exists()).toBe(true)
+      const trigger = wrapper.find('button#overlap')
+      expect(trigger.exists()).toBe(true)
 
-      const options = select.findAll('option')
-      expect(options).toHaveLength(6)
-      expect(options[0].attributes('value')).toBe('0')
-      expect(options[1].attributes('value')).toBe('0.5')
-      expect(options[2].attributes('value')).toBe('1')
-      expect(options[3].attributes('value')).toBe('1.5')
-      expect(options[4].attributes('value')).toBe('2')
-      expect(options[5].attributes('value')).toBe('2.5')
+      const options = [...trigger.element.parentElement.querySelectorAll('li[role="option"]')]
+      expect(options.map(o => o.textContent.trim())).toEqual([
+        'None', '0.5s', '1.0s', '1.5s', '2.0s', '2.5s'
+      ])
     })
 
     it('displays current recording_length value', async () => {
       const wrapper = mountSettings()
       await flushPromises()
 
-      const select = wrapper.find('#recordingLength')
-      expect(select.element.value).toBe('9')
+      const trigger = wrapper.find('button#recordingLength')
+      expect(trigger.text()).toContain('9 seconds')
     })
 
     it('displays current overlap value', async () => {
       const wrapper = mountSettings()
       await flushPromises()
 
-      const select = wrapper.find('#overlap')
-      expect(select.element.value).toBe('0')
+      const trigger = wrapper.find('button#overlap')
+      expect(trigger.text()).toContain('None')
     })
 
     it('updates recording_length when dropdown changes', async () => {
@@ -618,6 +848,32 @@ describe('Settings', () => {
   })
 
   describe('Saving Settings', () => {
+    it.each([
+      ['birdnet', 'birdnet_v3', 0.03],
+      ['birdnet_v3', 'birdnet', 0.15]
+    ])('preserves an explicitly retained threshold when switching %s to %s', async (from, to, threshold) => {
+      const saved = createMockSettings()
+      saved.model.type = from
+      saved.detection.species_filter_threshold = threshold
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: structuredClone(saved) })
+        : defaultGetResponse(url))
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      wrapper.vm.settings.model.type = to
+      wrapper.vm.onModelTypeChange()
+      wrapper.vm.settings.detection.species_filter_threshold = threshold
+      await wrapper.vm.saveSettings()
+
+      expect(mockApi.put).toHaveBeenCalledWith('/settings', {
+        model: { type: to },
+        detection: { species_filter_threshold: threshold }
+      })
+      expect(wrapper.vm.hasUnsavedChanges).toBe(false)
+      expect(useSettings().settings.value.detection.species_filter_threshold).toBe(threshold)
+    })
+
     it('saves settings when Save button clicked', async () => {
       const wrapper = mountSettings()
       await flushPromises()
@@ -715,7 +971,8 @@ describe('Settings', () => {
       const wrapper = mountSettings()
       await flushPromises()
 
-      mockApi.put.mockImplementationOnce(() => new Promise(resolve => setTimeout(resolve, 100)))
+      let releaseSave
+      mockApi.put.mockImplementationOnce(() => new Promise(resolve => { releaseSave = resolve }))
 
       // Make a change so hasUnsavedChanges becomes true
       wrapper.vm.settings.location.latitude = 50.0
@@ -726,6 +983,9 @@ describe('Settings', () => {
 
       expect(wrapper.vm.loading).toBe(true)
       expect(saveButton.attributes('disabled')).toBeDefined()
+      await flushPromises()
+      releaseSave({ data: { status: 'updated' } })
+      await flushPromises()
     })
 
     it('disables Save while a system update is in flight', async () => {
@@ -798,10 +1058,141 @@ describe('Settings', () => {
     })
   })
 
+  describe('Refreshing settings with open dialogs', () => {
+    it.each([false, true])('preserves the source editor baseline across a refresh (already fetching: %s)', async (alreadyFetching) => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      const remote = createMockSettings()
+      remote.audio.sources[0].enabled = false
+      let release
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? new Promise(resolve => { release = () => resolve({ data: structuredClone(remote), headers: { etag: '"remote"' } }) })
+        : defaultGetResponse(url))
+      const refresh = alreadyFetching ? wrapper.vm.loadSettings() : null
+      wrapper.vm.openEditSource('source_0')
+      await wrapper.vm.$nextTick()
+      const modal = wrapper.findComponent({ name: 'StreamSourceModal' })
+      await modal.find('#stream-label').setValue('Renamed microphone')
+      expect(wrapper.vm.hasUnsavedChanges).toBe(false)
+
+      if (!alreadyFetching) window.dispatchEvent(new Event('focus'))
+      release()
+      await refresh
+      await flushPromises()
+
+      expect(useSettings().settings.value.audio.sources[0].enabled).toBe(false)
+      expect(useSettings().revision.value).toBe('"remote"')
+      expect(wrapper.vm.settings.audio.sources[0].enabled).toBe(true)
+      expect(modal.find('#stream-label').element.value).toBe('Renamed microphone')
+      await modal.find('form').trigger('submit')
+      await flushPromises()
+
+      expect(mockApi.put).not.toHaveBeenCalled()
+      expect(wrapper.vm.showStreamModal).toBe(true)
+      expect(wrapper.vm.settingsSaveError).toContain('changed since you started editing')
+    })
+
+    it.each(['allowed', 'blocked', 'included'])('preserves the %s species editor baseline on focus', async (filterType) => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      wrapper.vm.openFilterModal(filterType)
+      await wrapper.vm.$nextTick()
+      const modal = wrapper.findComponent({ name: 'SpeciesFilterModal' })
+      modal.vm.toggleSpecies('Turdus migratorius')
+      expect(wrapper.vm.hasUnsavedChanges).toBe(false)
+
+      const listKey = `${filterType}_species`
+      const remote = createMockSettings()
+      remote.species_filter[listKey] = ['Cardinalis cardinalis']
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: structuredClone(remote), headers: { etag: '"remote"' } })
+        : defaultGetResponse(url))
+      window.dispatchEvent(new Event('focus'))
+      await flushPromises()
+
+      expect(useSettings().settings.value.species_filter[listKey]).toEqual(['Cardinalis cardinalis'])
+      expect(modal.vm.selectedSpecies).toEqual(['Turdus migratorius'])
+      await modal.vm.saveAndClose()
+      await flushPromises()
+
+      expect(mockApi.put).not.toHaveBeenCalled()
+      expect(wrapper.vm.showSpeciesFilterModal).toBe(true)
+      expect(modal.vm.saveError).toBeTruthy()
+      expect(modal.vm.selectedSpecies).toEqual(['Turdus migratorius'])
+    })
+
+    it('allows a source edit after an unrelated remote change and refreshes normally once closed', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      wrapper.vm.openEditSource('source_0')
+      await wrapper.vm.$nextTick()
+      const modal = wrapper.findComponent({ name: 'StreamSourceModal' })
+      await modal.find('#stream-label').setValue('Renamed microphone')
+
+      const remote = createMockSettings()
+      remote.display.station_name = 'Remote station name'
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: structuredClone(remote), headers: { etag: '"remote"' } })
+        : defaultGetResponse(url))
+      window.dispatchEvent(new Event('focus'))
+      await flushPromises()
+      await modal.find('form').trigger('submit')
+      await flushPromises()
+
+      expect(mockApi.put).toHaveBeenCalledWith('/settings', {
+        audio: { sources: [{ ...remote.audio.sources[0], label: 'Renamed microphone' }] }
+      }, { headers: { 'If-Match': '"remote"' } })
+      expect(wrapper.vm.showStreamModal).toBe(false)
+      expect(useSettings().settings.value.display.station_name).toBe('Remote station name')
+      remote.audio.sources[0].label = 'Renamed microphone'
+      window.dispatchEvent(new Event('focus'))
+      await flushPromises()
+      expect(wrapper.vm.settings.display.station_name).toBe('Remote station name')
+      expect(wrapper.vm.hasUnsavedChanges).toBe(false)
+    })
+  })
+
   describe('Audio Source List', () => {
+    it('saving a source leaves unrelated model and location edits unsaved', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      wrapper.vm.settings.model.type = 'birdnet_v3'
+      wrapper.vm.settings.location.latitude = 10
+      await wrapper.vm.handleStreamAdd({ type: 'rtsp', url: 'rtsp://camera/audio', label: 'Garden' })
+      expect(mockApi.put).toHaveBeenCalledWith('/settings', {
+        audio: { sources: expect.any(Array), next_source_id: 2 }
+      })
+      expect(useSettings().settings.value.model.type).toBe('birdnet')
+      expect(wrapper.vm.settings.model.type).toBe('birdnet_v3')
+      expect(wrapper.vm.settings.location.latitude).toBe(10)
+      expect(wrapper.vm.hasUnsavedChanges).toBe(true)
+      expect(mockRequestRestart).not.toHaveBeenCalled()
+    })
+
+    it('a failed source save keeps the saved source list intact', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      mockApi.put.mockRejectedValueOnce(new Error('offline'))
+      await wrapper.vm.handleStreamAdd({ type: 'rtsp', url: 'rtsp://camera/audio' })
+      expect(wrapper.vm.settings.audio.sources).toHaveLength(1)
+      expect(wrapper.vm.settingsSaveError).toContain('offline')
+    })
+
+    it('saving a species list never saves or restarts a model draft', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      wrapper.vm.settings.model.type = 'birdnet_v3'
+      wrapper.vm.openFilterModal('blocked')
+      await wrapper.vm.saveSpeciesFilter(['Turdus migratorius'])
+      expect(mockApi.put).toHaveBeenCalledWith('/settings', { species_filter: { blocked_species: ['Turdus migratorius'] } })
+      expect(wrapper.vm.settings.model.type).toBe('birdnet_v3')
+      expect(wrapper.vm.hasUnsavedChanges).toBe(true)
+      expect(mockRequestRestart).not.toHaveBeenCalled()
+    })
     // Helper: add an RTSP source via the modal handler
-    const addSource = (wrapper, source) => {
-      wrapper.vm.handleStreamAdd(source)
+    const addSource = async (wrapper, source) => {
+      await wrapper.vm.handleStreamAdd(source)
     }
 
     it('shows Microphone as default active source', async () => {
@@ -815,11 +1206,37 @@ describe('Settings', () => {
       expect(wrapper.text()).toContain('Microphone')
     })
 
+    it('offers a way to resume when every source is disabled', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      wrapper.vm.settings.audio.sources[0].enabled = false
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.vm.noActiveSourceHint).toBe('Enable a source to resume recording.')
+      expect(wrapper.find('[data-testid="no-active-source-hint"]').exists()).toBe(true)
+      // The "highlighted sources are enabled" legend needs something highlighted.
+      expect(wrapper.vm.hasInactiveSource).toBe(false)
+    })
+
+    it('shows the active-source legend only for a mixed list', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      await addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream', label: '' })
+      wrapper.vm.settings.audio.sources[0].enabled = false
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.vm.hasInactiveSource).toBe(true)
+      expect(wrapper.vm.noActiveSourceHint).toBe('')
+      expect(wrapper.find('[data-testid="no-active-source-hint"]').exists()).toBe(false)
+    })
+
     it('adds RTSP source with enabled flag', async () => {
       const wrapper = mountSettings()
       await flushPromises()
 
-      addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream', label: '' })
+      await addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream', label: '' })
 
       const sources = wrapper.vm.settings.audio.sources
       const rtsp = sources.find(s => s.type === 'rtsp')
@@ -833,7 +1250,7 @@ describe('Settings', () => {
       const wrapper = mountSettings()
       await flushPromises()
 
-      addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream', label: 'Backyard mic' })
+      await addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream', label: 'Backyard mic' })
 
       const sources = wrapper.vm.settings.audio.sources
       const rtsp = sources.find(s => s.url === 'rtsp://192.168.1.100:554/stream')
@@ -844,8 +1261,8 @@ describe('Settings', () => {
       const wrapper = mountSettings()
       await flushPromises()
 
-      addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream1', label: '' })
-      addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.200:554/stream2', label: '' })
+      await addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream1', label: '' })
+      await addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.200:554/stream2', label: '' })
 
       const rtspSources = wrapper.vm.settings.audio.sources.filter(s => s.type === 'rtsp')
       expect(rtspSources).toHaveLength(2)
@@ -855,10 +1272,10 @@ describe('Settings', () => {
       const wrapper = mountSettings()
       await flushPromises()
 
-      addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream', label: 'Old label' })
+      await addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream', label: 'Old label' })
       const sourceId = wrapper.vm.settings.audio.sources.find(s => s.type === 'rtsp').id
 
-      wrapper.vm.handleStreamSave({
+      await wrapper.vm.handleStreamSave({
         id: sourceId,
         updates: { url: 'rtsp://192.168.1.200:554/new', label: 'New label' },
       })
@@ -868,14 +1285,77 @@ describe('Settings', () => {
       expect(updated.label).toBe('New label')
     })
 
+    it('keeps a source toggle local until Save is chosen from the dismissal confirmation', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      await wrapper.get('[data-source-id="source_0"]').trigger('click')
+      const editor = wrapper.getComponent({ name: 'StreamSourceModal' })
+      await editor.get('[role="switch"]').trigger('click')
+      await flushPromises()
+      expect(mockApi.put).not.toHaveBeenCalled()
+      expect(useSettings().settings.value.audio.sources[0].enabled).toBe(true)
+      expect(wrapper.vm.settings.audio.sources[0].enabled).toBe(true)
+      expect(wrapper.get('[data-source-id="source_0"]').classes()).not.toContain('opacity-50')
+
+      await editor.get('button[title="Close"]').trigger('click')
+      const confirm = editor.getComponent({ name: 'UnsavedChangesModal' })
+      await confirm.findAll('button').find(button => button.text() === 'Save').trigger('click')
+      await flushPromises()
+      expect(mockApi.put).toHaveBeenCalledTimes(1)
+      expect(mockApi.put.mock.calls[0][1].audio.sources[0].enabled).toBe(false)
+      expect(useSettings().settings.value.audio.sources[0].enabled).toBe(false)
+      expect(wrapper.vm.settings.audio.sources[0].enabled).toBe(false)
+      expect(wrapper.vm.showStreamModal).toBe(false)
+    })
+
+    it('discards an unsaved source toggle without saving or changing the other page draft', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      wrapper.vm.settings.location.latitude = 50
+      await wrapper.get('[data-source-id="source_0"]').trigger('click')
+      const editor = wrapper.getComponent({ name: 'StreamSourceModal' })
+      await editor.get('[role="switch"]').trigger('click')
+      await editor.get('button[title="Close"]').trigger('click')
+      const confirm = editor.getComponent({ name: 'UnsavedChangesModal' })
+      await confirm.findAll('button').find(button => button.text() === 'Discard').trigger('click')
+      expect(mockApi.put).not.toHaveBeenCalled()
+      expect(wrapper.vm.showStreamModal).toBe(false)
+      expect(wrapper.vm.settings.location.latitude).toBe(50)
+      expect(wrapper.vm.hasUnsavedChanges).toBe(true)
+      await wrapper.get('[data-source-id="source_0"]').trigger('click')
+      expect(wrapper.getComponent({ name: 'StreamSourceModal' }).get('[role="switch"]').attributes('aria-checked')).toBe('true')
+    })
+
+    it('retains the source toggle after a failed save, confirms dismissal and allows retry', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      mockApi.put.mockRejectedValueOnce(new Error('Connection lost'))
+      await wrapper.get('[data-source-id="source_0"]').trigger('click')
+      const editor = wrapper.getComponent({ name: 'StreamSourceModal' })
+      await editor.get('[role="switch"]').trigger('click')
+      await editor.get('form').trigger('submit')
+      await flushPromises()
+      expect(wrapper.vm.showStreamModal).toBe(true)
+      expect(editor.text()).toContain('Connection lost')
+      expect(editor.get('[role="switch"]').attributes('aria-checked')).toBe('false')
+      expect(useSettings().settings.value.audio.sources[0].enabled).toBe(true)
+      await editor.get('button[title="Close"]').trigger('click')
+      const confirm = editor.getComponent({ name: 'UnsavedChangesModal' })
+      await confirm.findAll('button').find(button => button.text() === 'Save').trigger('click')
+      await flushPromises()
+      expect(mockApi.put).toHaveBeenCalledTimes(2)
+      expect(useSettings().settings.value.audio.sources[0].enabled).toBe(false)
+      expect(wrapper.vm.showStreamModal).toBe(false)
+    })
+
     it('deletes source by id', async () => {
       const wrapper = mountSettings()
       await flushPromises()
 
-      addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream', label: '' })
+      await addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream', label: '' })
       const sourceId = wrapper.vm.settings.audio.sources.find(s => s.type === 'rtsp').id
 
-      wrapper.vm.handleStreamDelete(sourceId)
+      await wrapper.vm.handleStreamDelete(sourceId)
 
       expect(wrapper.vm.settings.audio.sources.find(s => s.id === sourceId)).toBeUndefined()
     })
@@ -884,13 +1364,13 @@ describe('Settings', () => {
       const wrapper = mountSettings()
       await flushPromises()
 
-      addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream1', label: '' })
-      addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.200:554/stream2', label: '' })
+      await addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream1', label: '' })
+      await addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.200:554/stream2', label: '' })
 
       const sources = wrapper.vm.settings.audio.sources
       const firstRtsp = sources.find(s => s.url === 'rtsp://192.168.1.100:554/stream1')
 
-      wrapper.vm.handleStreamDelete(firstRtsp.id)
+      await wrapper.vm.handleStreamDelete(firstRtsp.id)
 
       const remaining = wrapper.vm.settings.audio.sources.filter(s => s.type === 'rtsp')
       expect(remaining).toHaveLength(1)
@@ -903,10 +1383,10 @@ describe('Settings', () => {
 
       expect(wrapper.vm.settings.audio.next_source_id).toBe(1)
 
-      addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream1', label: '' })
+      await addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.100:554/stream1', label: '' })
       expect(wrapper.vm.settings.audio.next_source_id).toBe(2)
 
-      addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.200:554/stream2', label: '' })
+      await addSource(wrapper, { type: 'rtsp', url: 'rtsp://192.168.1.200:554/stream2', label: '' })
       expect(wrapper.vm.settings.audio.next_source_id).toBe(3)
     })
   })
@@ -916,13 +1396,13 @@ describe('Settings', () => {
       const wrapper = mountSettings()
       await flushPromises()
 
-      const select = wrapper.find('#modelType')
-      expect(select.exists()).toBe(true)
+      const trigger = wrapper.find('button#modelType')
+      expect(trigger.exists()).toBe(true)
 
-      const options = select.findAll('option')
+      const options = [...trigger.element.parentElement.querySelectorAll('li[role="option"]')]
       expect(options).toHaveLength(2)
-      expect(options[0].attributes('value')).toBe('birdnet')
-      expect(options[1].attributes('value')).toBe('birdnet_v3')
+      expect(options[0].textContent).toContain('v2.4')
+      expect(options[1].textContent).toContain('v3.1')
     })
 
     it('changing model type marks hasUnsavedChanges', async () => {
@@ -1093,6 +1573,7 @@ describe('Settings', () => {
       // Saved instantly via the dedicated endpoint — no full-settings PUT, no draft change
       expect(mockApi.put).toHaveBeenCalledWith('/settings/playback', { normalize: true })
       expect(wrapper.vm.settings.playback.normalize).toBe(true)
+      expect(useSettings().settings.value.playback.normalize).toBe(true)
       expect(wrapper.vm.hasUnsavedChanges).toBe(false)
     })
 
@@ -1264,6 +1745,7 @@ describe('Settings', () => {
 
       // Reset and mock API failure
       mockApi.put.mockReset()
+    mockApi.put.mockResolvedValue({ data: { status: 'updated' } })
       mockApi.put.mockRejectedValue(new Error('API error'))
 
       // Set up modal state with a pending change
@@ -1283,11 +1765,224 @@ describe('Settings', () => {
       // Modal should stay open, navigation should NOT be resolved
       expect(wrapper.vm.showUnsavedModal).toBe(true)
       expect(navigationResolved).toBe(null)
-      expect(wrapper.vm.settingsSaveError).toContain('Failed to save')
+      expect(wrapper.vm.settingsSaveError).toContain('API error')
+    })
+  })
+
+  describe('Quiet Hours', () => {
+    const summary = (wrapper) => wrapper.find('[data-testid="quiet-hours-summary"]').text()
+    const timeField = (wrapper, index) =>
+      wrapper.findAllComponents({ name: 'AppTimeSelect' })[index].props('modelValue')
+
+    it('renders inside the Detection section with the stored window', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      expect(timeField(wrapper, 0)).toBe('22:00')
+      expect(timeField(wrapper, 1)).toBe('06:00')
+      expect(wrapper.vm.quietHours.enabled).toBe(false)
+      expect(summary(wrapper)).toBe('Recording runs around the clock.')
+    })
+
+    it('toggling saves immediately via the schedule endpoint without marking unsaved changes', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      mockApi.put.mockResolvedValueOnce({
+        data: { success: true, quiet_hours: { enabled: true, start: '22:00', end: '06:00' } }
+      })
+      await wrapper.vm.toggleQuietHours(true)
+      await flushPromises()
+
+      expect(mockApi.put).toHaveBeenCalledWith('/settings/schedule', { quiet_hours: { enabled: true } })
+      expect(wrapper.vm.settings.schedule.quiet_hours.enabled).toBe(true)
+      expect(useSettings().settings.value.schedule.quiet_hours.enabled).toBe(true)
+      expect(wrapper.vm.hasUnsavedChanges).toBe(false)
+      expect(summary(wrapper)).toContain('every day (8 h)')
+      expect(summary(wrapper)).toContain('wrap past midnight')
+    })
+
+    it('saves a committed time change as the full start/end pair', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      mockApi.put.mockResolvedValueOnce({
+        data: { success: true, quiet_hours: { enabled: false, start: '21:30', end: '06:00' } }
+      })
+      wrapper.vm.quietHoursDraft.start = '21:30'
+      await wrapper.vm.saveQuietHoursTime()
+      await flushPromises()
+
+      expect(mockApi.put).toHaveBeenCalledWith('/settings/schedule', { quiet_hours: { start: '21:30', end: '06:00' } })
+      expect(wrapper.vm.settings.schedule.quiet_hours.start).toBe('21:30')
+      expect(timeField(wrapper, 0)).toBe('21:30')
+    })
+
+    it('does not save an unchanged pair', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      await wrapper.vm.saveQuietHoursTime()
+      expect(mockApi.put).not.toHaveBeenCalled()
+    })
+
+    it('flags an equal pair inline, keeps the draft and saves nothing', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      wrapper.vm.quietHoursDraft.end = '22:00'
+      await wrapper.vm.saveQuietHoursTime()
+      await flushPromises()
+
+      expect(mockApi.put).not.toHaveBeenCalled()
+      expect(wrapper.vm.quietHoursDraft.end).toBe('22:00')
+      expect(wrapper.find('[data-testid="quiet-hours-error"]').text()).toBe('Start and end must differ — not saved yet.')
+      expect(wrapper.find('[data-testid="quiet-hours-summary"]').exists()).toBe(false)
+      expect(wrapper.vm.settings.schedule.quiet_hours.end).toBe('06:00')
+    })
+
+    it('lets a swap through: the pair saves once both fields are valid again', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      // 22:00–06:00 → 06:00–22:00 necessarily passes through 06:00–06:00
+      wrapper.vm.quietHoursDraft.start = '06:00'
+      await wrapper.vm.saveQuietHoursTime()
+      expect(mockApi.put).not.toHaveBeenCalled()
+
+      mockApi.put.mockResolvedValueOnce({
+        data: { success: true, quiet_hours: { enabled: false, start: '06:00', end: '22:00' } }
+      })
+      wrapper.vm.quietHoursDraft.end = '22:00'
+      await wrapper.vm.saveQuietHoursTime()
+      await flushPromises()
+
+      expect(mockApi.put).toHaveBeenCalledTimes(1)
+      expect(mockApi.put).toHaveBeenCalledWith('/settings/schedule', { quiet_hours: { start: '06:00', end: '22:00' } })
+      expect(wrapper.vm.settings.schedule.quiet_hours).toEqual({ enabled: false, start: '06:00', end: '22:00' })
+      expect(wrapper.find('[data-testid="quiet-hours-error"]').exists()).toBe(false)
+    })
+
+    it('flags a cleared field inline without saving', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      wrapper.vm.quietHoursDraft.start = ''
+      await wrapper.vm.saveQuietHoursTime()
+
+      expect(mockApi.put).not.toHaveBeenCalled()
+      expect(wrapper.find('[data-testid="quiet-hours-error"]').text()).toContain('must both be set')
+    })
+
+    it('keeps a half-entered draft when the toggle saves', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      wrapper.vm.quietHoursDraft.start = '06:00'  // invalid pair, deliberately unsaved
+      mockApi.put.mockResolvedValueOnce({
+        data: { success: true, quiet_hours: { enabled: true, start: '22:00', end: '06:00' } }
+      })
+      await wrapper.vm.toggleQuietHours(true)
+      await flushPromises()
+
+      expect(wrapper.vm.quietHoursDraft.start).toBe('06:00')
+    })
+
+    it('reverts both inputs and surfaces the server error when the save is rejected', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      mockApi.put.mockRejectedValueOnce({
+        response: { data: { error: 'quiet_hours.start must be a time in HH:MM (24-hour) format' } }
+      })
+      wrapper.vm.quietHoursDraft.start = '23:15'
+      await wrapper.vm.saveQuietHoursTime()
+      await flushPromises()
+
+      expect(wrapper.vm.quietHoursDraft.start).toBe('22:00')
+      expect(wrapper.vm.quietHoursDraft.end).toBe('06:00')
+      expect(wrapper.vm.settings.schedule.quiet_hours.start).toBe('22:00')
+      expect(wrapper.vm.saveStatus.type).toBe('error')
+      expect(wrapper.vm.saveStatus.message).toContain('HH:MM')
+    })
+
+    it('locks full-settings save paths while a quiet-hours request is pending, and vice versa', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      const saveButton = () => wrapper.findAll('button').find(b => b.text().startsWith('Save'))
+
+      let resolveRequest
+      mockApi.put.mockImplementationOnce(() => new Promise((resolve) => { resolveRequest = resolve }))
+      const pending = wrapper.vm.toggleQuietHours(true)
+      await wrapper.vm.$nextTick()
+      expect(wrapper.vm.quietHoursSaving).toBe(true)
+      expect(saveButton().attributes('disabled')).toBeDefined()
+
+      wrapper.vm.showUnsavedModal = true
+      await wrapper.vm.$nextTick()
+      const unsavedModal = wrapper.findComponent({ name: 'UnsavedChangesModal' })
+      expect(unsavedModal.props('saving')).toBe(true)
+
+      // Defend against direct/programmatic callers as well as the disabled UI.
+      await wrapper.vm.handleUnsavedSave()
+      expect(mockApi.put).toHaveBeenCalledTimes(1)
+      expect(wrapper.vm.showUnsavedModal).toBe(true)
+
+      resolveRequest({ data: { success: true, quiet_hours: { enabled: true, start: '22:00', end: '06:00' } } })
+      await pending
+      await wrapper.vm.$nextTick()
+      expect(saveButton().attributes('disabled')).toBeUndefined()
+      expect(unsavedModal.props('saving')).toBe(false)
+
+      // Main Save in flight → quiet-hours controls locked
+      wrapper.vm.loading = true
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('#quietHoursStart').attributes('disabled')).toBeDefined()
+      expect(wrapper.find('[aria-labelledby="quietHoursLabel"]').attributes('disabled')).toBeDefined()
+    })
+
+    it('gives the switch an accessible name from its label', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      const toggle = wrapper.find('[role="switch"][aria-labelledby="quietHoursLabel"]')
+      expect(toggle.exists()).toBe(true)
+      expect(wrapper.find('#quietHoursLabel').text()).toBe('Quiet Hours')
+    })
+
+    it('falls back to defaults when the settings payload predates the schedule section', async () => {
+      mockApi.get.mockImplementation((url) => {
+        if (url === '/settings') {
+          const legacy = createMockSettings()
+          delete legacy.schedule
+          return Promise.resolve({ data: legacy })
+        }
+        return defaultGetResponse(url)
+      })
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      expect(wrapper.vm.quietHours).toEqual({ enabled: false, start: '22:00', end: '06:00' })
+
+      mockApi.put.mockResolvedValueOnce({
+        data: { success: true, quiet_hours: { enabled: true, start: '22:00', end: '06:00' } }
+      })
+      await wrapper.vm.toggleQuietHours(true)
+      await flushPromises()
+
+      expect(wrapper.vm.settings.schedule.quiet_hours.enabled).toBe(true)
     })
   })
 
   describe('Notifications Section', () => {
+    it('notification toggles submit only the selected field', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      useSettings().patchSettings({ notifications: { rare_threshold: 10 } })
+      wrapper.vm.toggleNotificationSetting('every_detection')
+      await flushPromises()
+      expect(mockApi.put).toHaveBeenCalledWith('/settings/notifications', { every_detection: false })
+    })
     it('displays Notifications section', async () => {
       const wrapper = mountSettings()
       await flushPromises()
@@ -1401,9 +2096,10 @@ describe('Settings', () => {
       await flushPromises()
 
       expect(mockApi.put).toHaveBeenCalledWith('/settings/notifications', expect.any(Object))
+      expect(useSettings().settings.value.notifications.every_detection).toBe(false)
     })
 
-    it('notification save sequence ignores stale success and rolls back to latest confirmed on failure', async () => {
+    it('notification saves reach the server in order and roll back to the latest confirmation on failure', async () => {
       const wrapper = mountSettings()
       await flushPromises()
 
@@ -1425,7 +2121,9 @@ describe('Settings', () => {
       wrapper.vm.toggleNotificationSetting('every_detection')
       await flushPromises()
 
-      // Complete stale seq 1 after seq 2 already applied
+      expect(mockApi.put).toHaveBeenCalledTimes(1)
+
+      // The second request must wait until the first reaches the server.
       resolveFirstSave({ data: { success: true } })
       await flushPromises()
 
@@ -1438,6 +2136,18 @@ describe('Settings', () => {
   })
 
   describe('Immediate Toggle Guards', () => {
+    it('keeps successful access autosaves in the warm settings cache', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+
+      expect(useSettings().settings.value.access.charts_public).toBe(false)
+
+      await wrapper.vm.toggleFeatureAccess('charts_public')
+
+      expect(wrapper.vm.settings.access.charts_public).toBe(true)
+      expect(useSettings().settings.value.access.charts_public).toBe(true)
+    })
+
     it('toggleUpdateChannel ignores re-entry while request is in flight', async () => {
       const wrapper = mountSettings()
       await flushPromises()
@@ -1459,6 +2169,7 @@ describe('Settings', () => {
       resolveRequest({ data: { success: true } })
       await firstCall
       expect(wrapper.vm.updateChannelSaving).toBe(false)
+      expect(useSettings().settings.value.updates.channel).toBe('latest')
     })
 
     it('toggleMetricUnits ignores re-entry while request is in flight', async () => {
@@ -1482,6 +2193,7 @@ describe('Settings', () => {
       resolveRequest({ data: { success: true } })
       await firstCall
       expect(wrapper.vm.metricUnitsSaving).toBe(false)
+      expect(useSettings().settings.value.display.use_metric_units).toBe(false)
     })
 
     it('toggleTimeFormat syncs settings.value so a later full save preserves it', async () => {
@@ -1501,113 +2213,220 @@ describe('Settings', () => {
       expect(mockApi.put).toHaveBeenCalledWith('/settings/time-format', { time_format: '24h' })
       // settings.value is now in sync — a subsequent full PUT /settings sends '24h', not the stale '12h'
       expect(wrapper.vm.settings.display.time_format).toBe('24h')
+      expect(useSettings().settings.value.display.time_format).toBe('24h')
     })
   })
 
-  describe('Recorder Status & Error Display', () => {
-    const { RUNNING, DEGRADED, STOPPED } = RECORDER_STATES
+  describe('Combined audio status and source pills', () => {
+    const summary = wrapper => wrapper.get('[data-testid="audio-status-summary"]')
+    const pill = (wrapper, id = 'source_0') => wrapper.get(`[data-source-id="${id}"]`)
+    const status = (sources, extra = {}) => ({ recording: 'current', streaming: 'current', sources, ...extra })
+    const active = { recording: 'active', streaming: 'active' }
 
-    // Helper: build a multi-source status object matching the backend shape
-    const makeStatus = (state, sources = {}) => ({ state, sources })
-
-    const makeSource = (label, sourceState, lastError = null) => ({
-      label,
-      type: 'rtsp',
-      state: sourceState,
-      is_healthy: sourceState === RUNNING,
-      consecutive_failures: sourceState === RUNNING ? 0 : 5,
-      last_error_message: lastError,
-      last_error_time: lastError ? Date.now() / 1000 : null,
-      last_success_time: Date.now() / 1000
-    })
-
-    it('does not show error details when all sources are running', async () => {
+    it('shows one healthy summary and no per-source status sentences', async () => {
       const wrapper = mountSettings()
       await flushPromises()
+      expect(summary(wrapper).text()).toBe('Audio Healthy')
+      expect(summary(wrapper).attributes('role')).toBe('status')
+      expect(pill(wrapper).classes()).toContain('bg-blue-50')
+      expect(pill(wrapper).classes()).not.toContain('source-changing')
+      expect(wrapper.find('[data-testid="source-application-status"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="audio-application-pending"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="source-audio-details"]').exists()).toBe(false)
+    })
 
-      wrapper.vm.recorderStatus = makeStatus(RUNNING, {
-        source_0: makeSource('Microphone', RUNNING)
-      })
+    it('pulses a changing source, keeps failures enabled, and stops pulsing on failure', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      setStatus(status({ source_0: { ...active, streaming: 'connecting' } }))
       await wrapper.vm.$nextTick()
+      expect(summary(wrapper).text()).toBe('Updating Status…')
+      expect(pill(wrapper).classes()).toContain('source-changing')
+      expect(pill(wrapper).attributes('aria-label')).toContain('updating')
 
-      expect(wrapper.vm.showRecorderError).toBe(false)
+      setStatus(status({ source_0: { recording: 'failed', streaming: 'connecting' } }))
+      await wrapper.vm.$nextTick()
+      expect(summary(wrapper).text()).toBe('Audio Issue — Microphone')
+      expect(pill(wrapper).classes()).not.toContain('source-changing')
+      expect(pill(wrapper).classes()).toContain('bg-blue-50')
+      expect(pill(wrapper).attributes('aria-label')).toContain('enabled')
+    })
+
+    it('keeps unaffected sources steady while another changes, then greys out a disabled source', async () => {
+      const saved = createMockSettings()
+      saved.audio.sources.push({ id: 'source_1', type: 'rtsp', label: 'Backyard', url: 'rtsp://camera/audio', enabled: true })
+      useSettings().setSettings(saved)
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: structuredClone(saved) }) : defaultGetResponse(url))
+      const wrapper = mountSettings()
+      await flushPromises()
+      setStatus(status({ source_0: active, source_1: { ...active, recording: 'pending' } }))
+      await wrapper.vm.$nextTick()
+      expect(pill(wrapper).classes()).not.toContain('source-changing')
+      expect(pill(wrapper, 'source_1').classes()).toContain('source-changing')
+
+      saved.audio.sources[1].enabled = false
+      await wrapper.vm.loadSettings()
+      setStatus(status({ source_0: active, source_1: { recording: 'disabled', streaming: 'disabled' } }))
+      await wrapper.vm.$nextTick()
+      expect(summary(wrapper).text()).toBe('Audio Healthy')
+      expect(pill(wrapper, 'source_1').classes()).toContain('opacity-50')
+      expect(pill(wrapper, 'source_1').classes()).not.toContain('source-changing')
+    })
+
+    it('shows a quiet-hours pause with streaming active and puts streaming failures first', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      wrapper.vm.timeFormatSettings.setTimeFormat('24h')
+      const pause = { reason: 'quiet_hours', resumes_at: '2026-09-08T06:00' }
+      setStatus(status({ source_0: { ...active, recording: 'paused' } }, { pause }))
+      await wrapper.vm.$nextTick()
+      expect(summary(wrapper).text()).toBe('Paused until 06:00')
+      expect(pill(wrapper).classes()).toContain('bg-blue-50')
+      expect(pill(wrapper).classes()).not.toContain('source-changing')
+
+      setStatus(status({ source_0: { recording: 'paused', streaming: 'failed' } }, { pause }))
+      await wrapper.vm.$nextTick()
+      expect(summary(wrapper).text()).toBe('Audio Issue — Microphone')
+    })
+
+    it('pulses overlapping changes independently while disabled and paused sources stay steady', async () => {
+      const saved = createMockSettings()
+      saved.audio.sources.push(
+        { id: 'source_1', type: 'rtsp', label: 'Backyard', url: 'rtsp://camera/audio', enabled: true },
+        { id: 'source_2', type: 'rtsp', label: 'Unused', url: 'rtsp://unused/audio', enabled: false }
+      )
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: structuredClone(saved) }) : defaultGetResponse(url))
+      useRecorderHealth().connect()
+      const wrapper = mountSettings()
+      await flushPromises()
+      const paused = { recording: 'paused', streaming: 'active' }
+      const pending = { recording: 'pending', streaming: 'pending' }
+      const sources = {
+        source_0: pending, source_1: paused,
+        source_2: { recording: 'disabled', streaming: 'disabled' }
+      }
+      const expectChanging = (first, second) => {
+        expect(pill(wrapper).classes().includes('source-changing')).toBe(first)
+        expect(pill(wrapper, 'source_1').classes().includes('source-changing')).toBe(second)
+        expect(pill(wrapper, 'source_2').classes()).not.toContain('source-changing')
+        expect(pill(wrapper, 'source_2').classes()).toContain('opacity-50')
+      }
+      socketHandlers.settings_status(status(sources, { recording: 'pending' }))
+      await flushPromises()
+      expect(summary(wrapper).text()).toBe('Updating Status…')
+      expectChanging(true, false)
+
+      socketHandlers.settings_status(status({ ...sources, source_1: pending }, { recording: 'pending' }))
+      await flushPromises()
+      expectChanging(true, true)
+
+      socketHandlers.settings_status(status({ ...sources, source_0: paused, source_1: pending }, { recording: 'pending' }))
+      await flushPromises()
+      expectChanging(false, true)
+
+      socketHandlers.settings_status(status({ ...sources, source_0: paused }))
+      await flushPromises()
+      expectChanging(false, false)
+    })
+
+    it('shows sources disabled only after both services acknowledge the stop', async () => {
+      const saved = createMockSettings()
+      saved.audio.sources[0].enabled = false
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: saved }) : defaultGetResponse(url))
+      const wrapper = mountSettings()
+      await flushPromises()
+      setStatus(status({ source_0: { recording: 'disabled', streaming: 'pending' } }))
+      await wrapper.vm.$nextTick()
+      expect(summary(wrapper).text()).toBe('Updating Status…')
+      expect(pill(wrapper).classes()).toContain('source-changing')
+      setStatus(status({ source_0: { recording: 'disabled', streaming: 'disabled' } }))
+      await wrapper.vm.$nextTick()
+      expect(summary(wrapper).text()).toBe('Audio Paused — sources disabled')
+      expect(pill(wrapper).classes()).toContain('opacity-50')
+      expect(pill(wrapper).classes()).not.toContain('source-changing')
+    })
+
+    it('does not reuse stale health after a settings revision changes', async () => {
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: createMockSettings(), headers: { etag: 'W/"new"' } }) : defaultGetResponse(url))
+      const wrapper = mountSettings()
+      await flushPromises()
+      setStatus(status({ source_0: active }, { revision: '"old"' }))
+      await wrapper.vm.$nextTick()
+      expect(summary(wrapper).text()).toBe('Audio Status Unavailable')
+      await pill(wrapper).trigger('click')
+      expect(wrapper.findAll('[data-testid="source-audio-details"] dd').map(row => row.text()))
+        .toEqual(['Status unavailable', 'Status unavailable'])
+      setStatus(status({ source_0: active }, { revision: '"new"' }))
+      await wrapper.vm.$nextTick()
+      expect(summary(wrapper).text()).toBe('Audio Healthy')
+    })
+
+    it('clears audio and model health on disconnect and recovers from the reconnect snapshot', async () => {
+      useRecorderHealth().connect()
+      socketHandlers.settings_status(status({ source_0: { ...active, streaming: 'connecting' } }))
+      const wrapper = mountSettings()
+      await flushPromises()
+      expect(pill(wrapper).classes()).toContain('source-changing')
+      socketHandlers.disconnect()
+      await flushPromises()
+      expect(summary(wrapper).text()).toBe('Audio Status Unavailable')
+      expect(wrapper.vm.modelStatus).toBeNull()
+      expect(pill(wrapper).classes()).not.toContain('source-changing')
+      socketHandlers.settings_status(defaultStatus())
+      await flushPromises()
+      expect(summary(wrapper).text()).toBe('Audio Healthy')
+      expect(wrapper.vm.modelStatus.location_filter.state).toBe('active')
+      expect(mockApi.get).not.toHaveBeenCalledWith('/settings/status')
+    })
+
+    it('keeps recorder error details inside the affected source editor and clears them on recovery', async () => {
+      const wrapper = mountSettings()
+      await flushPromises()
+      setStatus(status({ source_0: { ...active, recording: 'failed', error: 'Device not found' } }))
+      await wrapper.vm.$nextTick()
+      expect(summary(wrapper).text()).toBe('Audio Issue — Microphone')
+      expect(wrapper.text()).not.toContain('Device not found')
+      await pill(wrapper).trigger('click')
+      expect(wrapper.get('[data-testid="source-audio-details"]').text()).toContain('Recording: Device not found')
+      setStatus(status({ source_0: active }))
+      await wrapper.vm.$nextTick()
       expect(wrapper.find('details').exists()).toBe(false)
     })
 
-    it('shows error details when a source is degraded with an error message', async () => {
+    it.each(['before', 'after'])('handles a socket snapshot arriving %s the save response', async (order) => {
+      const saved = createMockSettings()
+      mockApi.get.mockImplementation(url => url === '/settings'
+        ? Promise.resolve({ data: structuredClone(saved), headers: { etag: '"old"' } }) : defaultGetResponse(url))
+      useRecorderHealth().connect()
+      socketHandlers.settings_status({ ...defaultStatus(), revision: '"old"' })
       const wrapper = mountSettings()
       await flushPromises()
-
-      wrapper.vm.recorderStatus = makeStatus(DEGRADED, {
-        source_0: makeSource('Microphone', RUNNING),
-        source_1: makeSource('Backyard Cam', DEGRADED, 'Connection timed out')
-      })
-      await wrapper.vm.$nextTick()
-
-      expect(wrapper.vm.showRecorderError).toBe(true)
-      expect(wrapper.vm.sourceErrors).toHaveLength(1)
-      expect(wrapper.vm.sourceErrors[0]).toEqual({
-        label: 'Backyard Cam',
-        state: DEGRADED,
-        message: 'Connection timed out'
-      })
-    })
-
-    it('shows error details for multiple failing sources', async () => {
-      const wrapper = mountSettings()
+      let finishSave
+      mockApi.put.mockImplementation(() => new Promise(resolve => { finishSave = resolve }))
+      const saving = wrapper.vm.handleStreamSave({ id: 'source_0', updates: { enabled: false } })
       await flushPromises()
-
-      wrapper.vm.recorderStatus = makeStatus(STOPPED, {
-        source_0: makeSource('Microphone', STOPPED, 'Device not found'),
-        source_1: makeSource('Backyard Cam', DEGRADED, 'Connection refused')
-      })
-      await wrapper.vm.$nextTick()
-
-      expect(wrapper.vm.sourceErrors).toHaveLength(2)
-      const labels = wrapper.vm.sourceErrors.map(e => e.label)
-      expect(labels).toContain('Microphone')
-      expect(labels).toContain('Backyard Cam')
-    })
-
-    it('hides error details when source has no error message', async () => {
-      const wrapper = mountSettings()
+      const pending = status({ source_0: { recording: 'pending', streaming: 'disabled' } }, { revision: '"new"' })
+      if (order === 'before') socketHandlers.settings_status(pending)
+      saved.audio.sources[0].enabled = false
+      finishSave({ data: { settings: saved }, headers: { etag: 'W/"new"' } })
+      await saving
+      if (order === 'after') {
+        expect(summary(wrapper).text()).toBe('Audio Status Unavailable')
+        socketHandlers.settings_status(pending)
+      }
       await flushPromises()
-
-      wrapper.vm.recorderStatus = makeStatus(DEGRADED, {
-        source_0: makeSource('Microphone', DEGRADED, null)
-      })
-      await wrapper.vm.$nextTick()
-
-      expect(wrapper.vm.showRecorderError).toBe(false)
-    })
-
-    it('shows correct status dot and label for each aggregate state', async () => {
-      const wrapper = mountSettings()
+      expect(summary(wrapper).text()).toBe('Updating Status…')
+      expect(pill(wrapper).classes()).toContain('source-changing')
+      socketHandlers.settings_status(status({ source_0: { recording: 'disabled', streaming: 'disabled' } }, { revision: '"new"' }))
       await flushPromises()
-
-      // Running
-      wrapper.vm.recorderStatus = makeStatus(RUNNING, {
-        source_0: makeSource('Mic', RUNNING)
-      })
-      await wrapper.vm.$nextTick()
-      expect(wrapper.vm.recorderStateLabel).toBe('Audio Healthy')
-      expect(wrapper.vm.recorderDotClass).toContain('bg-green-500')
-
-      // Degraded
-      wrapper.vm.recorderStatus = makeStatus(DEGRADED, {
-        source_0: makeSource('Mic', DEGRADED, 'err')
-      })
-      await wrapper.vm.$nextTick()
-      expect(wrapper.vm.recorderStateLabel).toBe('Audio Degraded')
-      expect(wrapper.vm.recorderDotClass).toContain('bg-amber-500')
-
-      // Stopped
-      wrapper.vm.recorderStatus = makeStatus(STOPPED, {})
-      await wrapper.vm.$nextTick()
-      expect(wrapper.vm.recorderStateLabel).toBe('Audio Stopped')
-      expect(wrapper.vm.recorderDotClass).toContain('bg-red-500')
+      expect(summary(wrapper).text()).toBe('Audio Paused — sources disabled')
+      expect(pill(wrapper).classes()).not.toContain('source-changing')
+      expect(mockApi.get).not.toHaveBeenCalledWith('/settings/status')
     })
-
   })
 
   describe('HA Mode System Updates', () => {

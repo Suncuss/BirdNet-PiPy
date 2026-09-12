@@ -403,6 +403,7 @@ class NotificationService:
 
 # Singleton
 _notification_service = None
+_notification_service_lock = threading.Lock()  # hub-only: unused in API; getter runs only in unpatched main
 
 
 def get_notification_service(db_manager=None):
@@ -412,10 +413,11 @@ def get_notification_service(db_manager=None):
     allowing callers to skip notification processing entirely.
     """
     global _notification_service
-    if _notification_service is None and db_manager is not None:
-        settings = load_user_settings()
-        if settings['notifications']['apprise_urls']:
-            _notification_service = NotificationService(db_manager)
+    with _notification_service_lock:
+        if _notification_service is None and db_manager is not None:
+            settings = load_user_settings()
+            if settings['notifications']['apprise_urls']:
+                _notification_service = NotificationService(db_manager)
     return _notification_service
 
 

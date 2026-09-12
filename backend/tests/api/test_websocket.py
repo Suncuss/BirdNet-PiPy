@@ -8,6 +8,7 @@ fixed in b6b0f26) before it ships.
 """
 import json
 from contextlib import contextmanager
+from unittest.mock import Mock
 
 import pytest
 
@@ -23,6 +24,13 @@ _RECORDER_STATUS = {
         'last_error_message': "Failed to open rtsp://admin:hunter2@192.168.1.9/stream",
     }],
 }
+
+
+@pytest.fixture(autouse=True)
+def manual_settings_monitor(monkeypatch):
+    # Drive samples explicitly instead of leaking real background loops across
+    # temporary apps. Monitor lifecycle/cadence is tested separately.
+    monkeypatch.setattr('core.settings_monitor.SettingsStatusMonitor.start', Mock())
 
 
 @pytest.fixture
@@ -68,6 +76,19 @@ class TestWebSocketHandshake:
         client = socketio.test_client(app)
         client.disconnect()
         assert not client.is_connected()
+
+    def test_auth_disabled_logout_does_not_disconnect_owner_socket(self, ws_app):
+        """With auth disabled, access checks call everyone authenticated; an
+        anonymous logout must not mistake that for a real login session."""
+        app, socketio = ws_app
+        flask_client = app.test_client()
+        owner = socketio.test_client(app, flask_test_client=flask_client)
+
+        response = flask_client.post('/api/auth/logout')
+
+        assert response.status_code == 200
+        assert owner.is_connected()
+        owner.disconnect()
 
 
 class TestBroadcastDetectionEndToEnd:
@@ -119,6 +140,73 @@ def _auth_live_feed_ws_app():
             yield app, socketio, api_module
         finally:
             api_module._recorder_status = {}
+
+
+class TestSettingsStatusDelivery:
+    def test_watching_and_rewatching_receive_snapshot_without_browser_request(self, ws_app):
+        app, socketio = ws_app
+        monitor = app.extensions['settings_status_monitor']
+        monitor.read_model = Mock(return_value={})
+        snapshot = {'revision': '"saved"', 'recording': 'current', 'streaming': 'current'}
+        monitor.read_snapshot = Mock(return_value=snapshot)
+        first = socketio.test_client(app)
+        first.emit('watch_settings_status')
+        monitor.poll()
+        assert next(e for e in first.get_received() if e['name'] == 'settings_status')['args'][0] == snapshot
+        first.disconnect()
+
+        second = socketio.test_client(app)
+        second.emit('watch_settings_status')
+        monitor.poll()
+        assert next(e for e in second.get_received() if e['name'] == 'settings_status')['args'][0] == snapshot
+        monitor.read_model.assert_called_once()
+        second.disconnect()
+
+    def test_pages_without_settings_status_are_not_sampled_for(self, ws_app):
+        app, socketio = ws_app
+        monitor = app.extensions['settings_status_monitor']
+        monitor.read_model = Mock(return_value={})
+        monitor.read_snapshot = Mock(return_value={'revision': '"saved"'})
+        client = socketio.test_client(app)
+
+        def participants():
+            return tuple(socketio.server.manager.get_participants('/', 'settings-status'))
+        assert not participants()
+        monitor.poll()
+        assert 'settings_status' not in {e['name'] for e in client.get_received()}
+        client.emit('watch_settings_status')
+        assert participants()
+        client.emit('unwatch_settings_status')
+        assert not participants()
+        client.disconnect()
+
+    def test_snapshots_and_later_changes_remain_owner_only(self):
+        with _auth_live_feed_ws_app() as (app, socketio, _):
+            http = app.test_client()
+            http.post('/api/auth/setup', json={'password': AUTH_TEST_PASSWORD})
+            owner = socketio.test_client(app, flask_test_client=http)
+            public = socketio.test_client(app)
+            owner.emit('watch_settings_status')
+            public.emit('watch_settings_status')
+            monitor = app.extensions['settings_status_monitor']
+            monitor.read_model = Mock(return_value={})
+            monitor.read_snapshot = Mock(return_value={
+                'revision': '"saved"', 'streaming_error': 'Private camera error',
+                'sources': {'source_0': {'recording': 'active', 'streaming': 'failed'}},
+            })
+            monitor.poll()
+            assert 'settings_status' in {e['name'] for e in owner.get_received()}
+            assert 'settings_status' not in {e['name'] for e in public.get_received()}
+            monitor.read_snapshot.return_value = {'revision': '"new"', 'streaming': 'current'}
+            monitor.poll()
+            assert 'settings_status' in {e['name'] for e in owner.get_received()}
+            assert 'settings_status' not in {e['name'] for e in public.get_received()}
+            http.post('/api/auth/logout')
+            assert not owner.is_connected()
+            monitor.read_snapshot.return_value = {'revision': '"later"'}
+            monitor.poll()
+            assert 'settings_status' not in {e['name'] for e in public.get_received()}
+            public.disconnect()
 
 
 class TestRecorderStatusOwnerOnly:
@@ -175,6 +263,37 @@ class TestRecorderStatusOwnerOnly:
 
 
 class TestOwnerSocketRevocation:
+    def test_expired_owner_cookie_is_revoked_as_a_public_listener(self):
+        with _auth_live_feed_ws_app() as (app, socketio, _):
+            owner = app.test_client()
+            owner.post('/api/auth/setup', json={'password': AUTH_TEST_PASSWORD})
+            expired = app.test_client()
+            expired.post('/api/auth/login', json={'password': AUTH_TEST_PASSWORD})
+            with expired.session_transaction() as session:
+                session['epoch'] = -1
+            public = socketio.test_client(app, flask_test_client=expired)
+            assert public.is_connected()
+            assert owner.put('/api/settings/access', json={'live_feed_public': False}).status_code == 200
+            assert not public.is_connected()
+
+    @pytest.mark.parametrize('endpoint,body', [
+        ('/api/settings/access', {'live_feed_public': False}),
+        ('/api/settings', {'access': {'public_access': False}}),
+    ])
+    def test_disabling_public_feed_disconnects_existing_anonymous_sockets(self, endpoint, body):
+        with _auth_live_feed_ws_app() as (app, socketio, _):
+            http = app.test_client()
+            http.post('/api/auth/setup', json={'password': AUTH_TEST_PASSWORD})
+            owner = socketio.test_client(app, flask_test_client=http)
+            public = socketio.test_client(app)
+            assert public.is_connected()
+            response = http.put(endpoint, json=body)
+            assert response.status_code == 200
+            assert not public.is_connected()
+            assert owner.is_connected()
+            assert not socketio.test_client(app).is_connected()
+            owner.disconnect()
+
     """Password changes must be enforced by the server, not client JavaScript."""
 
     def test_revoke_disconnects_owner_but_not_public_listener(self):
@@ -201,3 +320,118 @@ class TestOwnerSocketRevocation:
             assert not owner.is_connected()
             assert anon.is_connected()
             anon.disconnect()
+
+    def test_logout_disconnects_owner_but_not_public_listener(self):
+        """Logout clears the session for HTTP, but the socket was authorised at
+        connect: without an explicit kick it keeps streaming recorder_status
+        (source labels and ffmpeg text that can echo RTSP credentials)."""
+        with _auth_live_feed_ws_app() as (app, socketio, _):
+            flask_client = app.test_client()
+            flask_client.post('/api/auth/setup',
+                              data=json.dumps({'password': AUTH_TEST_PASSWORD}),
+                              content_type='application/json')
+            owner = socketio.test_client(app, flask_test_client=flask_client)
+            anon = socketio.test_client(app, flask_test_client=app.test_client())
+            assert owner.is_connected()
+
+            response = flask_client.post('/api/auth/logout')
+
+            assert response.status_code == 200
+            assert not owner.is_connected()
+            assert anon.is_connected()
+            anon.disconnect()
+
+    def test_anonymous_logout_does_not_disconnect_owners(self):
+        """/api/auth/logout is deliberately public, so an unauthenticated POST
+        must not be able to kick every owner off the station on repeat."""
+        with _auth_live_feed_ws_app() as (app, socketio, _):
+            flask_client = app.test_client()
+            flask_client.post('/api/auth/setup',
+                              data=json.dumps({'password': AUTH_TEST_PASSWORD}),
+                              content_type='application/json')
+            owner = socketio.test_client(app, flask_test_client=flask_client)
+            assert owner.is_connected()
+
+            # A different client that never logged in.
+            response = app.test_client().post('/api/auth/logout')
+
+            assert response.status_code == 200
+            assert owner.is_connected()
+            owner.disconnect()
+
+    def test_logout_disconnects_only_the_calling_browser_session(self):
+        """A normal logout is local to one browser; another signed-in device
+        must keep its owner socket and must not need a reconnect dance."""
+        with _auth_live_feed_ws_app() as (app, socketio, _):
+            first_client = app.test_client()
+            second_client = app.test_client()
+            first_client.post('/api/auth/setup',
+                              data=json.dumps({'password': AUTH_TEST_PASSWORD}),
+                              content_type='application/json')
+            second_client.post('/api/auth/login',
+                               data=json.dumps({'password': AUTH_TEST_PASSWORD}),
+                               content_type='application/json')
+            first_socket = socketio.test_client(app, flask_test_client=first_client)
+            second_socket = socketio.test_client(app, flask_test_client=second_client)
+            assert first_socket.is_connected()
+            assert second_socket.is_connected()
+
+            response = first_client.post('/api/auth/logout')
+
+            assert response.status_code == 200
+            assert not first_socket.is_connected()
+            assert second_socket.is_connected()
+            second_socket.disconnect()
+
+    def test_legacy_cookie_session_is_revoked_after_a_re_login(self):
+        """A cookie predating session IDs identifies itself from
+        authenticated_at, which re-login replaces. If that identity is not
+        pinned at login, logout hunts for a session that no longer exists and
+        the browser keeps a live owner socket."""
+        with _auth_live_feed_ws_app() as (app, socketio, _):
+            flask_client = app.test_client()
+            flask_client.post('/api/auth/setup',
+                              data=json.dumps({'password': AUTH_TEST_PASSWORD}),
+                              content_type='application/json')
+
+            # Strip the ID to mimic a session minted before they existed.
+            with flask_client.session_transaction() as stored:
+                stored.pop('session_id', None)
+
+            owner = socketio.test_client(app, flask_test_client=flask_client)
+            assert owner.is_connected()
+
+            # Sign in again without logging out first.
+            flask_client.post('/api/auth/login',
+                              data=json.dumps({'password': AUTH_TEST_PASSWORD}),
+                              content_type='application/json')
+
+            assert flask_client.post('/api/auth/logout').status_code == 200
+            assert not owner.is_connected()
+
+    def test_logged_out_cookie_cannot_rejoin_as_owner(self):
+        """A reconnect carrying the pre-logout signed cookie may still join a
+        public feed, but it must not regain the owner-only recorder status."""
+        with _auth_live_feed_ws_app() as (app, socketio, _):
+            flask_client = app.test_client()
+            flask_client.post('/api/auth/setup',
+                              data=json.dumps({'password': AUTH_TEST_PASSWORD}),
+                              content_type='application/json')
+            stale_cookie = flask_client.get_cookie(app.config['SESSION_COOKIE_NAME'])
+            assert stale_cookie is not None
+
+            assert flask_client.post('/api/auth/logout').status_code == 200
+
+            replay_client = app.test_client()
+            replay_client.set_cookie(
+                app.config['SESSION_COOKIE_NAME'], stale_cookie.value
+            )
+            replacement = socketio.test_client(
+                app, flask_test_client=replay_client
+            )
+
+            assert replacement.is_connected()  # public live feed remains available
+            events = {event['name'] for event in replacement.get_received()}
+            assert 'recorder_status' not in events
+            assert replay_client.get('/api/recorder/status').status_code == 401
+            replacement.disconnect()

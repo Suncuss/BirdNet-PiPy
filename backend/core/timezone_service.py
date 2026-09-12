@@ -1,8 +1,8 @@
 """Timezone service — single source of truth for application timezone.
 
 Reads timezone from the user settings file (location.timezone), not the
-TZ environment variable.  A lightweight mtime-keyed cache with a TTL
-guard avoids settings reads and repeated stat() syscalls on the hot path
+TZ environment variable. A TTL over the shared runtime cache avoids
+settings reads and repeated stat() syscalls on the hot path
 (logging formatters call this on every log line).
 """
 
@@ -16,12 +16,11 @@ from core.runtime_config import _safe_mtime, get_runtime_setting
 
 _UTC = ZoneInfo("UTC")
 
-# Mtime-keyed cache with TTL — avoids settings reads and stat() on the hot
+# TTL cache — avoids settings reads and stat() on the hot
 # path. Native lock: local_now() runs both in request greenlets and in
 # DB-lane builder jobs (see core/native_lock.py). It guards only the TTL
 # gate and the publish; the settings read and tzdata load run outside it.
 _lock = native_lock()
-_tz_mtime: float | None = None
 _tz_str: str = "UTC"
 _tz_obj: ZoneInfo = _UTC
 _last_check: float = 0.0
@@ -30,7 +29,7 @@ _CHECK_INTERVAL: float = 1.0  # seconds between stat() calls
 
 def _refresh_cache() -> None:
     """Re-read timezone from settings if the file has changed."""
-    global _tz_mtime, _tz_str, _tz_obj, _last_check
+    global _tz_str, _tz_obj, _last_check
 
     now = time.monotonic()
     if now - _last_check < _CHECK_INTERVAL:
@@ -42,8 +41,11 @@ def _refresh_cache() -> None:
             return
         _last_check = now
 
-        mtime = _safe_mtime(USER_SETTINGS_PATH)
-        if mtime is None or mtime == _tz_mtime:
+        try:
+            mtime = _safe_mtime(USER_SETTINGS_PATH)
+        except OSError:
+            return
+        if mtime is None:
             return
 
     # The settings read (nested native _settings_lock, possible migration
@@ -51,7 +53,10 @@ def _refresh_cache() -> None:
     # log or block must never run under a native lock, and this function
     # runs inside logging formatters. The TTL stamp above stops a formatter
     # re-entered from that settings read before it can reach the lock again.
-    new_str = get_runtime_setting("location.timezone") or "UTC"
+    try:
+        new_str = get_runtime_setting("location.timezone") or "UTC"
+    except (OSError, ValueError, TypeError):
+        return  # Keep the last timezone; never recurse through logging here.
     try:
         new_obj = ZoneInfo(new_str)
     except Exception:
@@ -60,7 +65,6 @@ def _refresh_cache() -> None:
         new_obj = _UTC
 
     with _lock:
-        _tz_mtime = mtime
         _tz_str = new_str
         _tz_obj = new_obj
 

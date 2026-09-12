@@ -2,6 +2,7 @@
  * Tests for useSettings composable
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { flushPromises } from '@vue/test-utils'
 
 const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
@@ -42,6 +43,93 @@ const SETTINGS = {
 }
 
 describe('useSettings', () => {
+  it('uses the content revision when nginx weakens a compressed response ETag', async () => {
+    const store = useSettings()
+    mockApi.get.mockResolvedValue({ data: SETTINGS, headers: { etag: 'W/"one"' } })
+    await store.ensureLoaded()
+    expect(store.revision.value).toBe('"one"')
+    mockApi.put.mockResolvedValueOnce({ data: { settings: SETTINGS }, headers: { etag: 'W/"two"' } })
+    await store.save({ display: { station_name: 'Local' } })
+    expect(mockApi.put).toHaveBeenLastCalledWith('/settings', { display: { station_name: 'Local' } }, {
+      headers: { 'If-Match': '"one"' }
+    })
+    expect(store.revision.value).toBe('"two"')
+    mockApi.put.mockResolvedValueOnce({ data: { settings: SETTINGS }, headers: { etag: 'W/"three"' } })
+    await store.write('/settings/units', { use_metric_units: true })
+    expect(mockApi.put.mock.calls[1][2]).toEqual({ headers: { 'If-Match': '"two"' } })
+  })
+
+  it('does not report an empty cache as loaded when a newer refresh supersedes bootstrap', async () => {
+    const store = useSettings()
+    const releases = []
+    mockApi.get.mockImplementation(() => new Promise(resolve => releases.push(resolve)))
+    const bootstrap = store.ensureLoaded()
+    const refresh = store.refresh()
+    releases[0]({ data: SETTINGS })
+    expect(await bootstrap).toBe(false)
+    expect(store.settings.value).toBeNull()
+    expect(store.loading.value).toBe(true)
+    const joined = store.ensureLoaded()
+    expect(mockApi.get).toHaveBeenCalledTimes(2)
+    releases[1]({ data: SETTINGS })
+    expect(await refresh).toBe(true)
+    expect(await joined).toBe(true)
+    expect(store.settings.value).toEqual(SETTINGS)
+    expect(store.loading.value).toBe(false)
+  })
+
+  it('a GET during a pending write cannot change its precondition revision', async () => {
+    const store = useSettings()
+    mockApi.get.mockResolvedValue({ data: SETTINGS, headers: { etag: '"one"' } })
+    await store.refresh()
+    let release
+    mockApi.put.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    const pending = store.save({ display: { station_name: 'Local' } })
+    await flushPromises()
+    mockApi.get.mockResolvedValue({ data: { ...SETTINGS, display: { station_name: 'Remote' } }, headers: { etag: '"remote"' } })
+    await store.refresh()
+    expect(store.revision.value).toBe('"one"')
+    release({ data: { settings: SETTINGS }, headers: { etag: '"two"' } })
+    await pending
+    expect(store.revision.value).toBe('"two"')
+  })
+  it('serializes writes and sends the revision from the previous confirmation', async () => {
+    const store = useSettings()
+    mockApi.get.mockResolvedValue({ data: SETTINGS, headers: { etag: '"one"' } })
+    await store.refresh()
+    let release
+    mockApi.put.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+      .mockResolvedValueOnce({ data: { settings: SETTINGS }, headers: { etag: '"three"' } })
+    const first = store.save({ display: { station_name: 'First' } })
+    const second = store.save({ display: { station_name: 'Second' } })
+    await flushPromises()
+    expect(mockApi.put).toHaveBeenCalledTimes(1)
+    release({ data: { settings: SETTINGS }, headers: { etag: '"two"' } })
+    await Promise.all([first, second])
+    expect(mockApi.put.mock.calls[0][2]).toEqual({ headers: { 'If-Match': '"one"' } })
+    expect(mockApi.put.mock.calls[1][2]).toEqual({ headers: { 'If-Match': '"two"' } })
+  })
+
+  it('rejects edits to a field changed by a background refresh', async () => {
+    const store = useSettings()
+    store.setSettings(SETTINGS)
+    const base = structuredClone(SETTINGS)
+    store.patchSettings({ display: { station_name: 'Another session' } })
+    await expect(store.save({ display: { station_name: 'Stale draft' } }, { base })).rejects.toThrow('changed')
+    expect(mockApi.put).not.toHaveBeenCalled()
+  })
+
+  it('does not revive private settings after logout while a GET is pending', async () => {
+    const store = useSettings()
+    let release
+    mockApi.get.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    const pending = store.refresh()
+    store.resetState()
+    release({ data: SETTINGS, headers: { etag: '"old-session"' } })
+    await pending
+    expect(store.settings.value).toBeNull()
+    expect(store.revision.value).toBeNull()
+  })
   beforeEach(() => {
     mockApi.get.mockReset()
     mockApi.put.mockReset()
@@ -58,7 +146,7 @@ describe('useSettings', () => {
   it('exposes the expected surface', () => {
     const s = useSettings()
     for (const key of ['settings', 'loading', 'error', 'ensureLoaded',
-      'refresh', 'setSettings', 'resetState']) {
+      'refresh', 'setSettings', 'patchSettings', 'resetState']) {
       expect(s).toHaveProperty(key)
     }
   })
@@ -150,6 +238,41 @@ describe('useSettings', () => {
 
       await s.ensureLoaded()
       expect(mockApi.get).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('patchSettings', () => {
+    it('merges a persisted field without importing unrelated draft state', () => {
+      const s = useSettings()
+      s.setSettings(SETTINGS)
+
+      const patch = { display: { station_name: 'Front Porch' } }
+      expect(s.patchSettings(patch)).toBe(true)
+
+      expect(s.settings.value).toEqual({
+        ...SETTINGS,
+        display: { ...SETTINGS.display, station_name: 'Front Porch' }
+      })
+
+      patch.display.station_name = 'mutated by caller'
+      expect(s.settings.value.display.station_name).toBe('Front Porch')
+    })
+
+    it('keeps a local persisted patch when an older refresh resolves later', async () => {
+      const s = useSettings()
+      s.setSettings(SETTINGS)
+
+      let resolveRefresh
+      mockApi.get.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveRefresh = resolve
+      }))
+      const refresh = s.refresh()
+
+      s.patchSettings({ display: { station_name: 'Front Porch' } })
+      resolveRefresh({ data: SETTINGS })
+
+      expect(await refresh).toBe(true)
+      expect(s.settings.value.display.station_name).toBe('Front Porch')
     })
   })
 })

@@ -13,7 +13,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     ffmpeg \
     libpulse0 \
     curl \
-    jq
+    python3
 
 WORKDIR /app
 
@@ -26,6 +26,7 @@ RUN groupadd -g ${GID} streamer && \
 
 # Copy entry script and set permissions
 COPY --chown=streamer:streamer scripts/start-icecast.sh /app/start-icecast.sh
+COPY --chown=streamer:streamer scripts/stream_supervisor.py /app/stream_supervisor.py
 RUN chmod +x /app/start-icecast.sh
 
 # Switch to non-root user

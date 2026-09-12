@@ -13,6 +13,7 @@ from core.auth import (
     authenticate,
     change_password,
     get_public_features,
+    get_session_id,
     is_auth_enabled,
     is_authenticated,
     is_feature_public,
@@ -20,12 +21,17 @@ from core.auth import (
     is_setup_complete,
     logout,
     require_auth,
+    revoke_session_id,
     set_auth_enabled,
     setup_password,
 )
 from core.logging_config import get_logger, log_api_request
 from core.runtime_config import get_runtime_settings, invalidate_runtime_settings_cache
-from core.settings_store import load_user_settings, save_user_settings
+from core.settings_store import (
+    load_user_settings,
+    save_user_settings,
+    serialize_settings_write,
+)
 
 logger = get_logger(__name__)
 
@@ -86,7 +92,31 @@ def auth_login():
 @log_api_request
 def auth_logout():
     """Clear authentication session."""
+    # Read before clearing. Unlike is_authenticated(), this is None for an
+    # anonymous request while auth is disabled, so public logout cannot kick
+    # owner sockets. It also identifies only this login, preserving other
+    # browsers' live connections.
+    session_id = get_session_id() if is_authenticated() else None
+
+    if session_id:
+        try:
+            revoke_session_id(session_id)
+        except Exception as e:
+            # Do not claim logout succeeded while the still-valid signed
+            # cookie could immediately authenticate again.
+            logger.error("Failed to revoke logout session", extra={'error': str(e)})
+            return jsonify({'error': 'Logout failed'}), 500
+
     logout()
+
+    # Clearing the session closes the HTTP gates, but a WebSocket authorised at
+    # connect keeps its owner-room membership — and recorder_status with it —
+    # until the tab closes. Same kick as change_password.
+    if session_id:
+        # Function-local import: core.api imports this module's blueprint.
+        from core.api import revoke_owner_session_sockets
+        revoke_owner_session_sockets(session_id)
+
     return jsonify({'success': True, 'message': 'Logged out'}), 200
 
 
@@ -106,6 +136,8 @@ def auth_setup():
         # Validation is handled by setup_password() - no duplicate check needed
 
         setup_password(password)
+        from core.api import revoke_public_sockets
+        revoke_public_sockets(force=True)
 
         # Auto-login after setup
         authenticate(password)
@@ -141,12 +173,17 @@ def auth_toggle():
             return jsonify({'error': 'enabled field required'}), 400
 
         enabled = data['enabled']
+        if type(enabled) is not bool:
+            return jsonify({'error': 'enabled must be a boolean'}), 400
 
         # Prevent enabling auth without a password set
         if enabled and not is_setup_complete():
             return jsonify({'error': 'Cannot enable authentication without setting a password first'}), 400
 
         set_auth_enabled(enabled)
+        if enabled:
+            from core.api import revoke_public_sockets
+            revoke_public_sockets(force=True)
 
         return jsonify({
             'success': True,
@@ -162,6 +199,7 @@ def auth_toggle():
 @api.route('/api/settings/access', methods=['PUT'])
 @log_api_request
 @require_auth
+@serialize_settings_write
 @handle_api_errors
 def save_access_settings():
     """Save per-feature access settings with merge semantics.
@@ -188,6 +226,8 @@ def save_access_settings():
     current_settings['access'].update(data)
     save_user_settings(current_settings)
     invalidate_runtime_settings_cache()
+    from core.api import revoke_public_sockets
+    revoke_public_sockets()
 
     return jsonify({
         'success': True,

@@ -2,7 +2,36 @@
 
 ## [Unreleased]
 
+- Improved station load by sampling settings status and probing the model service only while the Settings page is open, instead of for every connected browser on every page.
+- Fixed the Settings audio summary staying unavailable after another device saved settings, until the window regained focus.
+- Fixed settings saves from API clients behind a compressing proxy failing the revision check.
+- Fixed a source that failed to start before quiet hours being reported as an audio issue for the whole pause.
+- Fixed Settings briefly claiming services had not reported the active model when reopened after being closed for a while.
+- Fixed source toggles submitting the editor immediately; source changes now wait for Save and prompt before unsaved edits are discarded.
+- Improved audio status responsiveness after startup and source changes by reporting transitions promptly and keeping slow model checks from delaying audio updates.
+- Fixed unrelated disabled or paused source pills pulsing when another source is changed.
+- Changed audio-source saves to use the existing status indicators instead of extra success messages.
+- Improved Settings loading with a small status skeleton while live health first arrives, avoiding misleading unavailable messages while keeping the form usable.
+- Improved Settings status updates by sharing live audio and model health over the existing connection, removing browser polling and clearing stale status after disconnection.
+- Improved audio status in Settings with one recording and streaming summary, source pills that pulse while connecting, and per-source details inside the editor.
+- Fixed compressed settings responses causing false save conflicts and unavailable audio status, and overlapping page loads incorrectly opening the setup wizard on configured stations.
+- Fixed model changes replacing an explicitly selected filter threshold, and background refreshes allowing open source or species editors to overwrite newer settings from another session.
+- Added live audio-source reload: changing a source reconnects its recorder and live stream while other sources continue. Settings now shows recording and streaming status separately, and keeps model changes marked as awaiting restart until services confirm the saved model is loaded.
+- Fixed settings saves overwriting unrelated drafts or newer changes from another session, and invalid settings replacing the last valid runtime configuration. Queued audio now retains its captured duration and is resampled for the loaded model; disabling public access also disconnects existing live listeners.
+- Fixed the Settings page briefly showing empty defaults — most visibly "recording is paused" — before the real values loaded: the form now opens from last-known settings without letting background refreshes overwrite edits, stays current after instant saves, and shows a loading skeleton on a genuine first load
+- Changed every dropdown to one shared, green-accented control so they look and behave identically everywhere — replacing the scattered `<select>` styles (four corner radii, four heights, four focus treatments, two drawing no focus ring at all) and the divergent custom menus. The whole control, open menu included, is now drawn by the app rather than the operating system, so it matches across browsers; keyboard use works throughout (arrow keys, Enter, and type-ahead — where a native select's letter-jump used to be the only option); the Charts time-range and period pickers are no longer hidden on phones, where they couldn't be changed at all; and the Table and Charts species search boxes were unified into one field with a clear button and consistent name matching.
+- Fixed logging out leaving the browser's live status connection authorised: the server now revokes that signed session, closes only its owner connections, and reconnects a public Live Feed only after the logout cookie is cleared, while anonymous logout requests and other signed-in devices leave owner connections alone
+- Fixed audio sources saved before the enable/disable toggle existed being treated as disabled by Settings while the recorder still recorded them, so the page could claim recording was paused on a station that was recording
+- Fixed the recorder status pill briefly showing an older state when overlapping status refreshes, a live update, or logout raced, which could persist until the next broadcast up to a minute later
+- Fixed simultaneous settings saves from separate controls or browser tabs silently overwriting one another, including access, notification, and quiet-hours changes
+- Fixed disabling every audio source being reported as a fault: with no active source the station now shows the blue "Audio Paused" pill and status badge (plus a hint under the source list) instead of a red "Audio Stopped" status, a false "Audio Recording Issues" warning, and an "Audio stopped" notification
+- Added quiet hours: a daily local-time window (e.g. 22:00–06:00, overnight allowed) during which recording and detection pause, applied live without a restart and without raising audio-status alerts. Set it under Settings → Detection → Quiet Hours with half-hour dropdowns that follow your 12/24-hour display setting; while a pause is in effect the audio status badge and a pill on every page read "Paused until …", so a quiet station is never mistaken for a broken one
+
+## [0.8.8] - 2026-08-21
+
 - Improved audio capture to be gapless: each source now records through one persistent ffmpeg stream (restarted automatically on failure) instead of a new process per segment, eliminating the dead air between recordings that cost slower devices like the Pi Zero 2W ~25-30% of all audio. Segments are also written in a single burst, which lets short-lived queue files avoid the SD card entirely on most systems; set `BIRDNET_CAPTURE_MODE=segment` to revert to per-segment capture
+- Fixed startup dying permanently when Docker is left with corrupted container records after an unclean shutdown: the service now detects and repairs them once per boot (removing the broken records with the daemon stopped) and retries, keeps retrying failed starts indefinitely instead of giving up after five attempts, and logs the underlying Docker error instead of swallowing it
+- Fixed the live-stream service starting an encoder for disabled audio sources; a disabled source could keep an ffmpeg reconnect loop running against its camera 24/7
 
 ## [0.8.7] - 2026-08-16
 

@@ -11,8 +11,10 @@
       <div class="relative bg-white rounded-xl shadow-xl max-w-lg w-full p-6">
         <!-- Close button -->
         <button
-          v-if="!testing"
+          v-if="!busy"
+          type="button"
           class="absolute top-4 right-4 text-gray-400 hover:text-gray-600"
+          title="Close"
           @click="requestDismiss"
         >
           <CloseIcon class="w-5 h-5" />
@@ -22,147 +24,206 @@
           {{ isEditing ? 'Edit Source' : 'Add Source' }}
         </h3>
 
+        <div
+          v-if="isEditing"
+          class="mb-4 rounded-lg bg-gray-50 p-3 text-xs"
+          data-testid="source-audio-details"
+        >
+          <dl
+            class="space-y-1"
+            aria-live="polite"
+            :aria-busy="statusLoading"
+          >
+            <div
+              v-for="[title, kind] in AUDIO_KINDS"
+              :key="kind"
+              class="flex justify-between gap-3"
+            >
+              <dt class="text-gray-600">
+                {{ title }}
+              </dt>
+              <dd :class="audioStatus[kind] === 'failed' ? 'text-red-600' : 'text-gray-700'">
+                <span
+                  v-if="statusLoading"
+                  class="block h-4 w-20 rounded bg-gray-200 animate-pulse motion-reduce:animate-none"
+                  aria-hidden="true"
+                />
+                <template v-else>
+                  {{ sourceStatusLabel(audioStatus[kind]) }}
+                </template>
+              </dd>
+            </div>
+          </dl>
+          <details
+            v-if="recordingError || streamingError"
+            class="mt-2"
+          >
+            <summary class="cursor-pointer text-gray-600">
+              Error details
+            </summary>
+            <pre class="mt-2 whitespace-pre-wrap break-words text-gray-600">{{ errorDetails }}</pre>
+            <button
+              type="button"
+              class="mt-2 text-blue-600 hover:text-blue-800"
+              @click="copyErrors"
+            >
+              {{ copied ? 'Copied' : 'Copy error details' }}
+            </button>
+          </details>
+        </div>
+
         <form
-          class="space-y-3"
           @submit.prevent="handleSubmit"
         >
-          <!-- Source type selector (only when adding) -->
-          <div v-if="!isEditing">
-            <label class="block text-sm text-gray-600 mb-1">Type</label>
-            <div class="flex gap-2">
-              <button
-                type="button"
-                class="flex-1 px-3 py-2 text-sm rounded-lg border transition-colors"
-                :class="sourceType === 'pulseaudio'
-                  ? 'border-blue-400 bg-blue-50 text-blue-700 font-medium'
-                  : 'border-gray-200 text-gray-600 hover:bg-gray-50'"
-                :disabled="hasMicSource"
-                :title="hasMicSource ? 'A microphone source already exists' : ''"
-                @click="sourceType = 'pulseaudio'"
-              >
-                Microphone
-              </button>
-              <button
-                type="button"
-                class="flex-1 px-3 py-2 text-sm rounded-lg border transition-colors"
-                :class="sourceType === 'rtsp'
-                  ? 'border-blue-400 bg-blue-50 text-blue-700 font-medium'
-                  : 'border-gray-200 text-gray-600 hover:bg-gray-50'"
-                @click="sourceType = 'rtsp'"
-              >
-                RTSP Stream
-              </button>
-            </div>
-            <p
-              v-if="hasMicSource && sourceType !== 'rtsp'"
-              class="text-xs text-amber-600 mt-1"
-            >
-              Only one microphone source is supported
-            </p>
-          </div>
-
-          <!-- URL field (RTSP only) -->
-          <div v-if="sourceType === 'rtsp'">
-            <label
-              for="stream-url"
-              class="block text-sm text-gray-600 mb-1"
-            >Stream URL</label>
-            <input
-              id="stream-url"
-              ref="urlInput"
-              v-model="url"
-              type="text"
-              class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
-              placeholder="rtsp://192.168.1.100/stream"
-              @input="clearErrors"
-            >
-          </div>
-
-          <!-- Label field -->
-          <div>
-            <label
-              for="stream-label"
-              class="block text-sm text-gray-600 mb-1"
-            >Label <span class="text-gray-400 font-normal">(optional)</span></label>
-            <input
-              id="stream-label"
-              ref="labelInput"
-              v-model="label"
-              type="text"
-              maxlength="30"
-              class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
-              :placeholder="sourceType === 'rtsp' ? 'e.g. Backyard mic' : 'e.g. Local Mic'"
-              @input="sanitizeLabelInput"
-            >
-            <p class="text-xs text-gray-400 mt-0.5">
-              Letters, numbers, spaces, hyphens, underscores. Max 30 characters.
-            </p>
-          </div>
-
-          <!-- Enabled toggle (edit mode only) -->
-          <div
-            v-if="isEditing"
-            class="flex items-center justify-between"
+          <fieldset
+            :disabled="busy"
+            class="space-y-3"
           >
-            <div>
-              <label class="text-sm text-gray-600">Active</label>
-              <p class="text-xs text-gray-400">
-                {{ enabled ? 'This source is being recorded' : 'This source will not be recorded' }}
+            <!-- Source type selector (only when adding) -->
+            <div v-if="!isEditing">
+              <label class="block text-sm text-gray-600 mb-1">Type</label>
+              <div class="flex gap-2">
+                <button
+                  type="button"
+                  class="flex-1 px-3 py-2 text-sm rounded-lg border transition-colors"
+                  :class="sourceType === 'pulseaudio'
+                    ? 'border-blue-400 bg-blue-50 text-blue-700 font-medium'
+                    : 'border-gray-200 text-gray-600 hover:bg-gray-50'"
+                  :disabled="hasMicSource"
+                  :title="hasMicSource ? 'A microphone source already exists' : ''"
+                  @click="sourceType = 'pulseaudio'"
+                >
+                  Microphone
+                </button>
+                <button
+                  type="button"
+                  class="flex-1 px-3 py-2 text-sm rounded-lg border transition-colors"
+                  :class="sourceType === 'rtsp'
+                    ? 'border-blue-400 bg-blue-50 text-blue-700 font-medium'
+                    : 'border-gray-200 text-gray-600 hover:bg-gray-50'"
+                  @click="sourceType = 'rtsp'"
+                >
+                  RTSP Stream
+                </button>
+              </div>
+              <p
+                v-if="hasMicSource && sourceType !== 'rtsp'"
+                class="text-xs text-amber-600 mt-1"
+              >
+                Only one microphone source is supported
               </p>
             </div>
-            <ToggleSwitch
-              v-model="enabled"
-              size="sm"
-            />
-          </div>
 
-          <!-- Testing progress -->
-          <div
-            v-if="testing"
-            class="flex items-center gap-2 text-blue-700 text-sm"
-          >
-            <Spinner class="h-4 w-4" />
-            <span>Testing stream connection...</span>
-          </div>
+            <!-- URL field (RTSP only) -->
+            <div v-if="sourceType === 'rtsp'">
+              <label
+                for="stream-url"
+                class="block text-sm text-gray-600 mb-1"
+              >Stream URL</label>
+              <input
+                id="stream-url"
+                ref="urlInput"
+                v-model="url"
+                type="text"
+                class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                placeholder="rtsp://192.168.1.100/stream"
+                @input="clearErrors"
+              >
+            </div>
 
-          <!-- Error display -->
-          <div
-            v-else-if="error"
-            class="text-xs text-red-600 bg-red-50 p-2 rounded-lg"
-          >
-            <span>{{ error }}</span>
-            <button
-              v-if="canForceSubmit"
-              type="button"
-              class="block text-gray-500 hover:text-gray-700 underline mt-1"
-              @click="handleForceSubmit"
-            >
-              {{ isEditing ? 'Save anyway' : 'Add anyway' }}
-            </button>
-          </div>
+            <!-- Label field -->
+            <div>
+              <label
+                for="stream-label"
+                class="block text-sm text-gray-600 mb-1"
+              >Label <span class="text-gray-400 font-normal">(optional)</span></label>
+              <input
+                id="stream-label"
+                ref="labelInput"
+                v-model="label"
+                type="text"
+                maxlength="30"
+                class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                :placeholder="sourceType === 'rtsp' ? 'e.g. Backyard mic' : 'e.g. Local Mic'"
+                @input="sanitizeLabelInput"
+              >
+              <p class="text-xs text-gray-400 mt-0.5">
+                Letters, numbers, spaces, hyphens, underscores. Max 30 characters.
+              </p>
+            </div>
 
-          <!-- Actions -->
-          <div class="flex items-center justify-between pt-2">
-            <button
+            <!-- Enabled toggle (edit mode only) -->
+            <div
               v-if="isEditing"
-              type="button"
-              class="text-xs text-red-500 hover:text-red-700 transition-colors"
-              @click="handleDelete"
+              class="flex items-center justify-between"
             >
-              Remove source
-            </button>
-            <span v-else />
-            <button
-              type="submit"
-              :disabled="!canSubmit || testing"
-              class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:bg-gray-400"
+              <div>
+                <label class="text-sm text-gray-600">Enabled</label>
+                <p class="text-xs text-gray-400">
+                  Include this source in recording and live streaming.
+                </p>
+              </div>
+              <ToggleSwitch
+                v-model="enabled"
+                size="sm"
+              />
+            </div>
+
+            <!-- Testing progress -->
+            <div
+              v-if="testing"
+              class="flex items-center gap-2 text-blue-700 text-sm"
             >
-              {{ submitLabel }}
-            </button>
-          </div>
+              <Spinner class="h-4 w-4" />
+              <span>Testing stream connection...</span>
+            </div>
+
+            <!-- Error display -->
+            <div
+              v-else-if="error || saveError"
+              class="text-xs text-red-600 bg-red-50 p-2 rounded-lg"
+            >
+              <span>{{ error || saveError }}</span>
+              <button
+                v-if="canForceSubmit"
+                type="button"
+                class="block text-gray-500 hover:text-gray-700 underline mt-1"
+                @click="handleForceSubmit"
+              >
+                {{ isEditing ? 'Save anyway' : 'Add anyway' }}
+              </button>
+            </div>
+
+            <!-- Actions -->
+            <div class="flex items-center justify-between pt-2">
+              <button
+                v-if="isEditing"
+                type="button"
+                class="text-xs text-red-500 hover:text-red-700 transition-colors"
+                @click="handleDelete"
+              >
+                Remove source
+              </button>
+              <span v-else />
+              <button
+                type="submit"
+                :disabled="!canSubmit || testing"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:bg-gray-400"
+              >
+                {{ saving ? 'Saving…' : submitLabel }}
+              </button>
+            </div>
+          </fieldset>
         </form>
       </div>
     </div>
+
+    <UnsavedChangesModal
+      v-if="showUnsavedModal"
+      @save="saveBeforeDismiss"
+      @discard="$emit('close')"
+      @cancel="showUnsavedModal = false"
+    />
   </div>
 </template>
 
@@ -176,14 +237,25 @@ import { createLongRequest } from '@/services/api'
 // instead of the default 15s client aborting into a generic failure (GH #56).
 const streamTestClient = createLongRequest(25000)
 import ToggleSwitch from '@/components/ToggleSwitch.vue'
+import UnsavedChangesModal from '@/components/UnsavedChangesModal.vue'
 import Spinner from '@/components/Spinner.vue'
 import CloseIcon from '@/components/icons/CloseIcon.vue'
 import { useModalDismiss } from '@/composables/useModalDismiss'
+import { useCopyFeedback } from '@/composables/useCopyFeedback'
+import { sourceStatusLabel } from '@/utils/audioStatus'
+
+const AUDIO_KINDS = [['Recording', 'recording'], ['Live stream', 'streaming']]
 
 export default {
   name: 'StreamSourceModal',
-  components: { ToggleSwitch, Spinner, CloseIcon },
+  components: { ToggleSwitch, UnsavedChangesModal, Spinner, CloseIcon },
   props: {
+    saving: { type: Boolean, default: false },
+    saveError: { type: String, default: '' },
+    audioStatus: { type: Object, default: () => ({ recording: 'unknown', streaming: 'unknown' }) },
+    statusLoading: { type: Boolean, default: false },
+    recordingError: { type: String, default: '' },
+    streamingError: { type: String, default: '' },
     source: {
       type: Object,
       default: null
@@ -204,8 +276,17 @@ export default {
     const testing = ref(false)
     const error = ref('')
     const canForceSubmit = ref(false)
+    const { copied, copy } = useCopyFeedback()
+    const errorDetails = computed(() => [
+      props.recordingError && `Recording: ${props.recordingError}`,
+      props.streamingError && `Live stream: ${props.streamingError}`
+    ].filter(Boolean).join('\n'))
+    const copyErrors = () => copy(errorDetails.value)
 
     const isEditing = computed(() => !!props.source)
+    // Neither a stream test nor a save in flight may be interrupted by a
+    // second submit, a delete or a dismissal.
+    const busy = computed(() => props.saving || testing.value)
 
     const hasMicSource = computed(() =>
       props.existingSources.some(s => s.type === 'pulseaudio')
@@ -215,6 +296,19 @@ export default {
     if (!isEditing.value && hasMicSource.value) {
       sourceType.value = 'rtsp'
     }
+
+    // Capture the opening baseline once. Live status or settings refreshes
+    // must not redefine which edits the user would lose on dismissal.
+    const draftValues = () => ({
+      type: sourceType.value,
+      url: sourceType.value === 'rtsp' ? url.value.trim() : '',
+      label: label.value.trim(),
+      enabled: enabled.value
+    })
+    const initialValues = draftValues()
+    const hasUnsavedChanges = computed(() =>
+      Object.entries(draftValues()).some(([key, value]) => value !== initialValues[key]))
+    const showUnsavedModal = ref(false)
 
     const canSubmit = computed(() => {
       if (sourceType.value === 'rtsp') return !!url.value.trim()
@@ -331,6 +425,7 @@ export default {
     }
 
     const handleSubmit = async () => {
+      if (busy.value) return
       clearErrors()
       if (!validateLabel()) return
 
@@ -355,6 +450,7 @@ export default {
     }
 
     const handleForceSubmit = () => {
+      if (busy.value) return
       clearErrors()
       if (!validateLabel()) return
 
@@ -368,13 +464,24 @@ export default {
     }
 
     const handleDelete = () => {
+      if (busy.value) return
       emit('delete', props.source.id)
+    }
+
+    const saveBeforeDismiss = () => {
+      // Return to the editor so validation, stream testing and save errors use
+      // the same controls as its Save button, including "Save anyway".
+      showUnsavedModal.value = false
+      return handleSubmit()
     }
 
     const { requestDismiss } = useModalDismiss(
       () => true,
-      () => emit('close'),
-      { canDismiss: () => !testing.value }
+      () => {
+        if (hasUnsavedChanges.value) showUnsavedModal.value = true
+        else emit('close')
+      },
+      { canDismiss: () => !busy.value && !showUnsavedModal.value }
     )
 
     onMounted(() => {
@@ -387,6 +494,12 @@ export default {
 
     return {
       urlInput,
+      AUDIO_KINDS,
+      busy,
+      sourceStatusLabel,
+      errorDetails,
+      copied,
+      copyErrors,
       labelInput,
       sourceType,
       url,
@@ -405,6 +518,8 @@ export default {
       handleForceSubmit,
       handleDelete,
       requestDismiss,
+      showUnsavedModal,
+      saveBeforeDismiss,
     }
   }
 }

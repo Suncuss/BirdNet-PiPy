@@ -22,6 +22,33 @@ def write_wav(path, sample_rate, samples):
         wf.writeframes(samples.astype('<i2').tobytes())
 
 
+@pytest.mark.parametrize('duration,preference', [(15, 9), (9, 15)])
+def test_queued_audio_uses_captured_duration(tmp_path, duration, preference):
+    from model_service.inference_server import split_audio
+    path = str(tmp_path / 'queued.wav')
+    write_wav(path, 48000, np.zeros(duration * 48000, dtype=np.int16))
+    chunks = split_audio(path, 3, 48000, preference)
+    assert len(chunks) == duration // 3
+
+
+def test_queued_audio_resamples_to_loaded_model_rate(tmp_path):
+    from model_service.inference_server import split_audio
+    path = str(tmp_path / 'queued.wav')
+    write_wav(path, 48000, np.ones(9 * 48000, dtype=np.int16) * 1000)
+    chunks = split_audio(path, 3, 32000, 9)
+    assert len(chunks) == 3
+    assert all(len(chunk) == 96000 for chunk in chunks)
+    assert np.mean(chunks[1]) == pytest.approx(1000 / 32768, rel=0.01)
+
+
+def test_pending_model_retains_loaded_filter_threshold():
+    import model_service.inference_server as inference
+    loaded = inference.model_type.value
+    next_model = 'birdnet_v3' if loaded == 'birdnet' else 'birdnet'
+    assert inference.active_filter_threshold({'model': {'type': loaded}, 'detection': {'species_filter_threshold': 0.07}}) == 0.07
+    assert inference.active_filter_threshold({'model': {'type': next_model}, 'detection': {'species_filter_threshold': 0.15}}) == 0.07
+
+
 class TestSplitAudioOverlap:
     """Test split_audio function with various overlap settings."""
 

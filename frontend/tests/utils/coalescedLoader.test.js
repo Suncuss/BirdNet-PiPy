@@ -5,6 +5,21 @@ import { describe, it, expect, vi } from 'vitest'
 import { createCoalescedLoader } from '@/utils/coalescedLoader'
 
 describe('createCoalescedLoader', () => {
+  it('a superseded failure cannot discard the newer in-flight load', async () => {
+    const releases = []
+    const loader = vi.fn(() => new Promise(resolve => releases.push(resolve)))
+    const cl = createCoalescedLoader()
+    const first = cl.ensure(loader)
+    cl.reset()
+    const second = cl.ensure(loader)
+    releases[0](false)
+    expect(await first).toBe(false)
+    expect(cl.ensure(loader)).toBe(second)
+    releases[1](true)
+    expect(await second).toBe(true)
+    expect(loader).toHaveBeenCalledTimes(2)
+  })
+
   it('runs the loader once and caches the result', async () => {
     const loader = vi.fn().mockResolvedValue(true)
     const cl = createCoalescedLoader()

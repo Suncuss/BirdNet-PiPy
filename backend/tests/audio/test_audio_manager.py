@@ -702,11 +702,20 @@ class TestRtspRecorderLifecycle:
 
         recorder.is_running = True
         recorder.recording_thread = Mock()
-        recorder.recording_thread.is_alive.return_value = True
+        recorder.recording_thread.is_alive.side_effect = [True, False]
 
         recorder.stop()
 
         assert recorder.is_running is False
+
+    def test_stop_timeout_prevents_restart_from_starting_a_second_thread(self, temp_output_dir):
+        recorder = RtspRecorder('rtsp://camera/audio', 3.0, temp_output_dir, 48000)
+        recorder.is_running = True
+        recorder.recording_thread = Mock()
+        recorder.recording_thread.is_alive.return_value = True
+        with patch.object(recorder, 'start') as start, pytest.raises(RuntimeError, match='did not stop'):
+            recorder.restart()
+        start.assert_not_called()
 
     def test_is_healthy_returns_false_when_not_running(self, temp_output_dir):
         """Test is_healthy() returns False when recorder is stopped."""

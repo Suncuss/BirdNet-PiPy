@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue'
 import api from '@/services/api'
+import { writeSettings } from '@/services/settingsWrites'
 import { createCoalescedLoader } from '@/utils/coalescedLoader'
 import { useLogger } from './useLogger'
 
@@ -114,13 +115,21 @@ export function useAuth() {
   /**
    * Logout and clear session
    */
+  /**
+   * End the session.
+   * @returns {Promise<boolean>} true when the session actually ended. A failed
+   * request leaves the user signed in, so callers must not tear down
+   * authenticated state on a false.
+   */
   const logout = async () => {
     try {
       await api.post('/auth/logout')
       authStatus.value.authenticated = false
       logger.info('Logged out')
+      return true
     } catch (err) {
       logger.error('Logout error', err)
+      return false
     }
   }
 
@@ -205,7 +214,7 @@ export function useAuth() {
    */
   const saveAccessSettings = async (accessSettings) => {
     try {
-      await api.put('/settings/access', accessSettings)
+      await writeSettings('/settings/access', accessSettings)
       await checkAuthStatus()
       logger.info('Access settings saved', accessSettings)
       return true

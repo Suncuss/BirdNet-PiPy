@@ -273,13 +273,12 @@ class BaseRecorder(ABC):
 
     def stop(self):
         """Stop recording and wait for thread to finish"""
-        if not self.is_running:
-            return
-
         self.is_running = False
         self._interrupt()
         if self.recording_thread and self.recording_thread.is_alive():
             self.recording_thread.join(timeout=5)
+            if self.recording_thread.is_alive():
+                raise RuntimeError("Recorder did not stop; replacement deferred")
 
     def _interrupt(self) -> None:  # noqa: B027 — optional hook, deliberately concrete
         """Unblock the recording thread during stop(). No-op by default;
