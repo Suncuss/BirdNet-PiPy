@@ -16,6 +16,8 @@ const socketHandlers = vi.hoisted(() => ({}))
 const socketMock = vi.hoisted(() => ({
   on: vi.fn((event, handler) => { socketHandlers[event] = handler }),
   once: vi.fn((event, handler) => { socketHandlers[event] = handler }),
+  emit: vi.fn(),
+  connected: true,
   connect: vi.fn(),
   disconnect: vi.fn()
 }))
@@ -318,11 +320,22 @@ describe('useRecorderHealth', () => {
       useRecorderHealth().disconnect()
       Object.keys(socketHandlers).forEach((key) => delete socketHandlers[key])
       ioMock.mockClear()
+      socketMock.emit.mockClear()
       socketMock.connect.mockClear()
       socketMock.disconnect.mockClear()
     })
 
+    // Watches outlive a socket on purpose (a page stays mounted across a
+    // re-login), so tests release theirs explicitly.
+    const watches = []
+    const watch = (health) => {
+      const stop = health.watchSettingsStatus()
+      watches.push(stop)
+      return stop
+    }
+
     afterEach(() => {
+      watches.splice(0).forEach(stop => stop())
       useRecorderHealth().disconnect()
     })
 
@@ -371,6 +384,150 @@ describe('useRecorderHealth', () => {
 
       expect(socketMock.disconnect).toHaveBeenCalled()
       expect(socketMock.connect).toHaveBeenCalled()
+    })
+
+    it('shares settings snapshots without issuing status requests', () => {
+      const health = useRecorderHealth()
+      health.connect()
+      watch(health)
+      mockApi.get.mockClear()
+      const status = { revision: '"saved"', sources: { mic: { recording: 'active', streaming: 'failed' } } }
+      socketHandlers.settings_status(status)
+      expect(useRecorderHealth().settingsStatus.value).toEqual(status)
+      expect(mockApi.get).not.toHaveBeenCalled()
+    })
+
+    it('loads only until the first snapshot and does not reset when reused', () => {
+      const health = useRecorderHealth()
+      health.connect()
+      watch(health)
+      expect(health.settingsStatusLoading.value).toBe(true)
+      socketHandlers.settings_status({ revision: '"saved"' })
+      health.connect()
+      watch(health)
+      expect(health.settingsStatusLoading.value).toBe(false)
+      expect(health.settingsStatus.value.revision).toBe('"saved"')
+      expect(ioMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('bounds the initial wait even when no snapshot ever arrives', async () => {
+      const health = useRecorderHealth()
+      health.connect()
+      watch(health)
+      await vi.advanceTimersByTimeAsync(14999)
+      expect(health.settingsStatusLoading.value).toBe(true)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(health.settingsStatusLoading.value).toBe(false)
+      expect(health.settingsStatus.value).toBeNull()
+      expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it.each(['connect_error', 'disconnect', 'settings_status'])('ends initial loading on %s failure', (event) => {
+      const health = useRecorderHealth()
+      mockApi.get.mockResolvedValue({ data: {} })
+      health.connect()
+      watch(health)
+      socketHandlers[event](event === 'connect_error' ? new Error('unreachable') : null)
+      expect(health.settingsStatusLoading.value).toBe(false)
+      expect(health.settingsStatus.value).toBeNull()
+      socketHandlers.settings_status({ revision: '"recovered"' })
+      expect(health.settingsStatusLoading.value).toBe(false)
+      expect(health.settingsStatus.value.revision).toBe('"recovered"')
+    })
+
+    it('expires silent status, extends it on heartbeats, and recovers on a fresh snapshot', async () => {
+      const health = useRecorderHealth()
+      health.connect()
+      watch(health)
+      const status = { revision: '"saved"', recording: 'current', streaming: 'current' }
+      socketHandlers.settings_status(status)
+      await vi.advanceTimersByTimeAsync(10000)
+      socketHandlers.settings_status(status)
+      await vi.advanceTimersByTimeAsync(10000)
+      expect(health.settingsStatus.value).toEqual(status)
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(health.settingsStatus.value).toBeNull()
+      expect(health.settingsStatusLoading.value).toBe(false)
+      expect(health.recorderStatus.value).toBeNull()
+      socketHandlers.settings_status(status)
+      expect(health.settingsStatus.value).toEqual(status)
+    })
+
+    it('clears both statuses on disconnect and accepts the reconnect snapshot', () => {
+      const health = useRecorderHealth()
+      health.connect()
+      watch(health)
+      socketHandlers.recorder_status({ state: 'running' })
+      socketHandlers.settings_status({ revision: '"old"' })
+      socketHandlers.disconnect()
+      expect(health.settingsStatus.value).toBeNull()
+      expect(health.settingsStatusLoading.value).toBe(false)
+      expect(health.recorderStatus.value).toBeNull()
+      socketHandlers.settings_status({ revision: '"new"' })
+      expect(health.settingsStatus.value.revision).toBe('"new"')
+    })
+
+    it('cannot restore owner status from a socket discarded at logout', () => {
+      const health = useRecorderHealth()
+      health.connect()
+      watch(health)
+      const lateSettings = socketHandlers.settings_status
+      const lateRecorder = socketHandlers.recorder_status
+      health.disconnect()
+      lateSettings({ revision: '"old"' })
+      lateRecorder({ state: 'running' })
+      expect(health.settingsStatus.value).toBeNull()
+      expect(health.recorderStatus.value).toBeNull()
+      expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it('ignores a discarded socket failure during a new login', async () => {
+      const health = useRecorderHealth()
+      health.connect()
+      watch(health)
+      const oldError = socketHandlers.connect_error
+      health.disconnect()
+      ioMock.mockReturnValueOnce({ ...socketMock })
+      health.connect()
+      mockApi.get.mockClear()
+      oldError(new Error('old connection'))
+      expect(health.settingsStatusLoading.value).toBe(false)
+      expect(mockApi.get).not.toHaveBeenCalled()
+    })
+
+    it('asks the API for settings status only while a page watches, and again on every connection', () => {
+      const health = useRecorderHealth()
+      health.connect()
+      expect(socketMock.emit).not.toHaveBeenCalled()
+      const unwatch = watch(health)
+      const unwatchSecond = watch(health)
+      expect(socketMock.emit.mock.calls).toEqual([['watch_settings_status']])
+      socketHandlers.connect()
+      expect(socketMock.emit.mock.calls).toEqual([['watch_settings_status'], ['watch_settings_status']])
+      socketHandlers.settings_status({ revision: '"saved"' })
+      unwatchSecond()
+      expect(health.settingsStatus.value.revision).toBe('"saved"')
+      unwatch()
+      unwatch()
+      expect(socketMock.emit).toHaveBeenLastCalledWith('unwatch_settings_status')
+      expect(socketMock.emit).toHaveBeenCalledTimes(3)
+      expect(health.settingsStatus.value).toBeNull()
+      expect(health.settingsStatusLoading.value).toBe(false)
+      expect(vi.getTimerCount()).toBe(0)
+      socketHandlers.connect()
+      expect(socketMock.emit).toHaveBeenCalledTimes(3)
+    })
+
+    it('keeps the same snapshot object across identical heartbeats', () => {
+      const health = useRecorderHealth()
+      health.connect()
+      watch(health)
+      socketHandlers.settings_status({ revision: '"saved"', sources: { mic: { recording: 'active' } } })
+      const first = health.settingsStatus.value
+      socketHandlers.settings_status({ revision: '"saved"', sources: { mic: { recording: 'active' } } })
+      expect(health.settingsStatus.value).toBe(first)
+      socketHandlers.settings_status({ revision: '"saved"', sources: { mic: { recording: 'failed' } } })
+      expect(health.settingsStatus.value).not.toBe(first)
     })
   })
 })

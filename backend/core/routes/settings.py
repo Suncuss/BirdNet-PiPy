@@ -5,29 +5,24 @@ core.runtime_config classifies which sections changed and the affected
 services pick the new values up live. Persistence itself lives in
 core.settings_store. Registered on the shared ``api`` blueprint at import.
 """
-import re
 
 from flask import jsonify, request
 
 from config.constants import (
-    OVERLAP_OPTIONS,
-    RECORDING_LENGTH_OPTIONS,
     UPDATE_CHANNELS,
-    VALID_MODEL_TYPES,
 )
 from config.settings import get_default_settings
 from core.api_infra import api
 from core.auth import require_auth
 from core.bird_name_utils import (
-    SUPPORTED_BIRD_NAME_LANGUAGES,
     clear_bird_name_caches,
 )
 from core.ha_mode import is_home_assistant_mode
 from core.logging_config import get_logger, log_api_request
-from core.recording_schedule import validate_schedule_settings
 from core.runtime_config import (
     classify_setting_changes,
     deep_merge_settings,
+    get_runtime_settings,
     get_setting_differences,
     invalidate_runtime_settings_cache,
 )
@@ -37,8 +32,10 @@ from core.settings_store import (
     load_user_settings,
     save_user_settings,
     serialize_settings_write,
+    settings_etag,
     update_quiet_hours,
 )
+from core.settings_validation import validate_settings
 from core.utils import normalize_site_url
 
 logger = get_logger(__name__)
@@ -72,8 +69,10 @@ def get_timezone_for_location(lat: float, lon: float) -> str | None:
 def get_settings():
     """Get all user settings"""
     try:
-        settings = load_user_settings()
-        return jsonify(settings), 200
+        settings = get_runtime_settings(force_reload=True, strict=True)
+        response = jsonify(settings)
+        response.headers['ETag'] = settings_etag(settings)
+        return response, 200
     except Exception as e:
         logger.error("Failed to get settings", extra={
             'error': str(e)
@@ -348,104 +347,32 @@ def update_settings():
     """Update user settings and apply changes without container restart."""
     try:
         incoming_settings = request.json
-        if not incoming_settings:
+        if not incoming_settings or not isinstance(incoming_settings, dict):
             return jsonify({'error': 'No settings data provided'}), 400
 
         current_settings = load_user_settings()
         new_settings = deep_merge_settings(current_settings, incoming_settings)
 
-        # Validate audio settings
-        if 'audio' in incoming_settings:
-            incoming_audio = incoming_settings['audio']
-
-            # Validate sources array if provided
-            sources = incoming_audio.get('sources')
-            if sources is not None:
-                if not isinstance(sources, list):
-                    return jsonify({'error': 'sources must be an array'}), 400
-                seen_ids = set()
-                mic_count = 0
-                for source in sources:
-                    sid = source.get('id', '')
-                    # Full match, not a prefix check: the id becomes a directory
-                    # name under RECORDING_DIR, so anything past the prefix has
-                    # to be digits.
-                    # [0-9], not \d: \d is Unicode-aware on str, so
-                    # 'source_٣' would pass a check that reads as ASCII-only.
-                    if not re.fullmatch(r'source_[0-9]+', sid or ''):
-                        return jsonify({'error': f'Invalid source id: {sid}. Must match source_<int>'}), 400
-                    if sid in seen_ids:
-                        return jsonify({'error': f'Duplicate source id: {sid}'}), 400
-                    seen_ids.add(sid)
-
-                    stype = source.get('type', '')
-                    if stype not in ('pulseaudio', 'rtsp'):
-                        return jsonify({'error': f'Invalid source type: {stype}. Must be pulseaudio or rtsp'}), 400
-                    if stype == 'rtsp':
-                        url = source.get('url', '')
-                        if not url or not url.startswith(('rtsp://', 'rtsps://')):
-                            return jsonify({'error': f'RTSP source {sid} must have a valid rtsp:// or rtsps:// URL'}), 400
-                    if stype == 'pulseaudio':
-                        mic_count += 1
-                if mic_count > 1:
-                    return jsonify({'error': 'Only one microphone source is allowed'}), 400
-
-                # Validate next_source_id if provided
-                next_id = incoming_audio.get('next_source_id')
-                if next_id is not None and seen_ids:
-                    max_suffix = max(
-                        (int(sid.split('_', 1)[1]) for sid in seen_ids),
-                        default=-1
-                    )
-                    if next_id <= max_suffix:
-                        return jsonify({'error': f'next_source_id ({next_id}) must be greater than max existing id suffix ({max_suffix})'}), 400
-
-            # Validate recording_length
-            recording_length = incoming_audio.get('recording_length')
-            if recording_length is not None and recording_length not in RECORDING_LENGTH_OPTIONS:
-                return jsonify({'error': 'Invalid recording_length. Must be 9, 12, or 15 seconds'}), 400
-
-            # Validate overlap
-            overlap = incoming_audio.get('overlap')
-            if overlap is not None and overlap not in OVERLAP_OPTIONS:
-                return jsonify({'error': 'Invalid overlap. Must be 0.0, 0.5, 1.0, 1.5, 2.0, or 2.5 seconds'}), 400
-
-        # Validate model type
-        if 'model' in incoming_settings:
-            model_type = new_settings['model'].get('type')
-            if model_type and model_type not in VALID_MODEL_TYPES:
-                return jsonify({'error': f'Invalid model type. Must be one of: {", ".join(VALID_MODEL_TYPES)}'}), 400
-
-        # Validate display settings
-        if 'display' in incoming_settings:
-            bird_name_language = new_settings.get('display', {}).get('bird_name_language')
-            if bird_name_language and bird_name_language not in SUPPORTED_BIRD_NAME_LANGUAGES:
-                supported = ', '.join(sorted(SUPPORTED_BIRD_NAME_LANGUAGES))
-                return jsonify({
-                    'error': f'Invalid bird_name_language. Must be one of: {supported}'
-                }), 400
-
-            if 'site_url' in incoming_settings['display']:
-                site_url = incoming_settings['display']['site_url']
-                if not isinstance(site_url, str):
-                    return jsonify({'error': 'display.site_url must be a string'}), 400
-                try:
-                    new_settings['display']['site_url'] = normalize_site_url(site_url)
-                except ValueError as e:
-                    return jsonify({'error': str(e)}), 400
-
-        # Validate notification settings
-        if 'notifications' in incoming_settings:
-            error = _validate_notification_settings(incoming_settings['notifications'])
-            if error:
-                return jsonify({'error': error}), 400
-
-        # Validate the recording schedule (quiet hours) on the merged result,
-        # so a partial update is checked against the values it will land on
-        if 'schedule' in incoming_settings:
-            error = validate_schedule_settings(new_settings.get('schedule'))
-            if error:
-                return jsonify({'error': error}), 400
+        error = validate_settings(incoming_settings, partial=True)
+        if error:
+            return jsonify({'error': error}), 400
+        if any(key in incoming_settings.get('location', {}) for key in ('latitude', 'longitude')):
+            new_settings['location']['configured'] = True
+        # The server owns model-aware defaults, including API-only clients.
+        if new_settings.get('model', {}).get('type') != current_settings.get('model', {}).get('type'):
+            from config.constants import (
+                DEFAULT_GEOMODEL_FILTER_THRESHOLD,
+                DEFAULT_SPECIES_FILTER_THRESHOLD,
+            )
+            if 'species_filter_threshold' not in incoming_settings.get('detection', {}):
+                new_settings.setdefault('detection', {})['species_filter_threshold'] = (
+                    DEFAULT_GEOMODEL_FILTER_THRESHOLD if new_settings['model']['type'] == 'birdnet_v3'
+                    else DEFAULT_SPECIES_FILTER_THRESHOLD)
+        if 'site_url' in incoming_settings.get('display', {}):
+            try:
+                new_settings['display']['site_url'] = normalize_site_url(new_settings['display']['site_url'])
+            except ValueError as exc:
+                return jsonify({'error': str(exc)}), 400
 
         # Compute timezone when location is being saved and timezone is missing or location changed
         # This ensures all containers have correct timezone on next restart
@@ -472,6 +399,10 @@ def update_settings():
                     # Preserve existing timezone if not in incoming payload
                     new_settings['location']['timezone'] = current_loc['timezone']
 
+        error = validate_settings(new_settings)
+        if error:
+            return jsonify({'error': error}), 400
+
         changed_paths = get_setting_differences(current_settings, new_settings)
         change_plan = classify_setting_changes(changed_paths, current_settings, new_settings)
 
@@ -493,6 +424,9 @@ def update_settings():
             invalidate_dashboard_cache()
             invalidate_gallery_cache()
         clear_bird_name_caches()
+        if any(path.startswith("access.") for path in changed_paths):
+            from core.api import revoke_public_sockets
+            revoke_public_sockets()
 
         logger.info("Settings updated", extra={
             'changed_sections': list(incoming_settings.keys()),
@@ -503,9 +437,9 @@ def update_settings():
         if not changed_paths:
             message = 'No changes detected.'
         elif change_plan['full_restart_required']:
-            message = 'Settings applied. Restarting...'
+            message = 'Settings saved. Restart services to apply the model change.'
         else:
-            message = 'Settings applied.'
+            message = 'Settings saved. Live settings take effect at the next processing boundary.'
 
         return jsonify({
             'status': 'updated',
@@ -513,7 +447,7 @@ def update_settings():
             'settings': new_settings,
             'changes': {
                 'changed_paths': changed_paths,
-                'hot_applied': change_plan['hot_applied'],
+                'hot_reload_paths': change_plan['hot_reload_paths'],
                 'component_restarts': change_plan['component_restarts'],
                 'full_restart_required': change_plan['full_restart_required'],
                 'full_restart_paths': change_plan['full_restart_paths'],

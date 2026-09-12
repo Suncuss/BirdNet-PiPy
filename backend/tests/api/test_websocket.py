@@ -8,6 +8,7 @@ fixed in b6b0f26) before it ships.
 """
 import json
 from contextlib import contextmanager
+from unittest.mock import Mock
 
 import pytest
 
@@ -23,6 +24,13 @@ _RECORDER_STATUS = {
         'last_error_message': "Failed to open rtsp://admin:hunter2@192.168.1.9/stream",
     }],
 }
+
+
+@pytest.fixture(autouse=True)
+def manual_settings_monitor(monkeypatch):
+    # Drive samples explicitly instead of leaking real background loops across
+    # temporary apps. Monitor lifecycle/cadence is tested separately.
+    monkeypatch.setattr('core.settings_monitor.SettingsStatusMonitor.start', Mock())
 
 
 @pytest.fixture
@@ -134,6 +142,73 @@ def _auth_live_feed_ws_app():
             api_module._recorder_status = {}
 
 
+class TestSettingsStatusDelivery:
+    def test_watching_and_rewatching_receive_snapshot_without_browser_request(self, ws_app):
+        app, socketio = ws_app
+        monitor = app.extensions['settings_status_monitor']
+        monitor.read_model = Mock(return_value={})
+        snapshot = {'revision': '"saved"', 'recording': 'current', 'streaming': 'current'}
+        monitor.read_snapshot = Mock(return_value=snapshot)
+        first = socketio.test_client(app)
+        first.emit('watch_settings_status')
+        monitor.poll()
+        assert next(e for e in first.get_received() if e['name'] == 'settings_status')['args'][0] == snapshot
+        first.disconnect()
+
+        second = socketio.test_client(app)
+        second.emit('watch_settings_status')
+        monitor.poll()
+        assert next(e for e in second.get_received() if e['name'] == 'settings_status')['args'][0] == snapshot
+        monitor.read_model.assert_called_once()
+        second.disconnect()
+
+    def test_pages_without_settings_status_are_not_sampled_for(self, ws_app):
+        app, socketio = ws_app
+        monitor = app.extensions['settings_status_monitor']
+        monitor.read_model = Mock(return_value={})
+        monitor.read_snapshot = Mock(return_value={'revision': '"saved"'})
+        client = socketio.test_client(app)
+
+        def participants():
+            return tuple(socketio.server.manager.get_participants('/', 'settings-status'))
+        assert not participants()
+        monitor.poll()
+        assert 'settings_status' not in {e['name'] for e in client.get_received()}
+        client.emit('watch_settings_status')
+        assert participants()
+        client.emit('unwatch_settings_status')
+        assert not participants()
+        client.disconnect()
+
+    def test_snapshots_and_later_changes_remain_owner_only(self):
+        with _auth_live_feed_ws_app() as (app, socketio, _):
+            http = app.test_client()
+            http.post('/api/auth/setup', json={'password': AUTH_TEST_PASSWORD})
+            owner = socketio.test_client(app, flask_test_client=http)
+            public = socketio.test_client(app)
+            owner.emit('watch_settings_status')
+            public.emit('watch_settings_status')
+            monitor = app.extensions['settings_status_monitor']
+            monitor.read_model = Mock(return_value={})
+            monitor.read_snapshot = Mock(return_value={
+                'revision': '"saved"', 'streaming_error': 'Private camera error',
+                'sources': {'source_0': {'recording': 'active', 'streaming': 'failed'}},
+            })
+            monitor.poll()
+            assert 'settings_status' in {e['name'] for e in owner.get_received()}
+            assert 'settings_status' not in {e['name'] for e in public.get_received()}
+            monitor.read_snapshot.return_value = {'revision': '"new"', 'streaming': 'current'}
+            monitor.poll()
+            assert 'settings_status' in {e['name'] for e in owner.get_received()}
+            assert 'settings_status' not in {e['name'] for e in public.get_received()}
+            http.post('/api/auth/logout')
+            assert not owner.is_connected()
+            monitor.read_snapshot.return_value = {'revision': '"later"'}
+            monitor.poll()
+            assert 'settings_status' not in {e['name'] for e in public.get_received()}
+            public.disconnect()
+
+
 class TestRecorderStatusOwnerOnly:
     """recorder_status is owner-only over the socket, matching the @require_auth
     /api/recorder/status REST route. It carries source labels and ffmpeg error
@@ -188,6 +263,37 @@ class TestRecorderStatusOwnerOnly:
 
 
 class TestOwnerSocketRevocation:
+    def test_expired_owner_cookie_is_revoked_as_a_public_listener(self):
+        with _auth_live_feed_ws_app() as (app, socketio, _):
+            owner = app.test_client()
+            owner.post('/api/auth/setup', json={'password': AUTH_TEST_PASSWORD})
+            expired = app.test_client()
+            expired.post('/api/auth/login', json={'password': AUTH_TEST_PASSWORD})
+            with expired.session_transaction() as session:
+                session['epoch'] = -1
+            public = socketio.test_client(app, flask_test_client=expired)
+            assert public.is_connected()
+            assert owner.put('/api/settings/access', json={'live_feed_public': False}).status_code == 200
+            assert not public.is_connected()
+
+    @pytest.mark.parametrize('endpoint,body', [
+        ('/api/settings/access', {'live_feed_public': False}),
+        ('/api/settings', {'access': {'public_access': False}}),
+    ])
+    def test_disabling_public_feed_disconnects_existing_anonymous_sockets(self, endpoint, body):
+        with _auth_live_feed_ws_app() as (app, socketio, _):
+            http = app.test_client()
+            http.post('/api/auth/setup', json={'password': AUTH_TEST_PASSWORD})
+            owner = socketio.test_client(app, flask_test_client=http)
+            public = socketio.test_client(app)
+            assert public.is_connected()
+            response = http.put(endpoint, json=body)
+            assert response.status_code == 200
+            assert not public.is_connected()
+            assert owner.is_connected()
+            assert not socketio.test_client(app).is_connected()
+            owner.disconnect()
+
     """Password changes must be enforced by the server, not client JavaScript."""
 
     def test_revoke_disconnects_owner_but_not_public_listener(self):

@@ -96,7 +96,7 @@ class TestSettingsManagement:
         """Test atomic save of user settings."""
         from core import settings_store
 
-        test_settings = {'test': 'data'}
+        test_settings = {'display': {'station_name': 'Test station'}}
 
         with patch.object(settings_store, 'atomic_write_private_json') as mock_write:
             settings_store.save_user_settings(test_settings)

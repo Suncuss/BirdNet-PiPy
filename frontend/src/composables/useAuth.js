@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue'
 import api from '@/services/api'
+import { writeSettings } from '@/services/settingsWrites'
 import { createCoalescedLoader } from '@/utils/coalescedLoader'
 import { useLogger } from './useLogger'
 
@@ -213,7 +214,7 @@ export function useAuth() {
    */
   const saveAccessSettings = async (accessSettings) => {
     try {
-      await api.put('/settings/access', accessSettings)
+      await writeSettings('/settings/access', accessSettings)
       await checkAuthStatus()
       logger.info('Access settings saved', accessSettings)
       return true

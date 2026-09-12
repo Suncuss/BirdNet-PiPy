@@ -1,5 +1,5 @@
 import { ref, computed } from 'vue'
-import api from '@/services/api'
+import { writeSettings } from '@/services/settingsWrites'
 
 /**
  * Time-format display preference.
@@ -94,7 +94,7 @@ export function useTimeFormat() {
     loading.value = true
     error.value = ''
     try {
-      await api.put('/settings/time-format', { time_format: value })
+      await writeSettings('/settings/time-format', { time_format: value })
       explicitFormat.value = value
       return true
     } catch (err) {

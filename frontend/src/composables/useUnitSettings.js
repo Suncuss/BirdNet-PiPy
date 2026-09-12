@@ -1,5 +1,5 @@
 import { ref, computed } from 'vue'
-import api from '@/services/api'
+import { writeSettings } from '@/services/settingsWrites'
 
 /**
  * Shared state (singleton pattern) - all components share the same refs.
@@ -91,7 +91,7 @@ export function useUnitSettings() {
     error.value = ''
 
     try {
-      await api.put('/settings/units', { use_metric_units: newValue })
+      await writeSettings('/settings/units', { use_metric_units: newValue })
       useMetricUnits.value = newValue
       return true
     } catch (err) {

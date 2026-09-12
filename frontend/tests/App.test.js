@@ -266,6 +266,32 @@ describe('App', () => {
     })
   })
 
+  it('does not open setup while a Settings page refresh supersedes bootstrap', async () => {
+    vi.useFakeTimers()
+    const releases = []
+    mockApi.get.mockImplementation(url => url === '/settings'
+      ? new Promise(resolve => releases.push(resolve))
+      : Promise.resolve({ data: {} }))
+    const wrapper = mountApp()
+    try {
+      await flushPromises()
+      const refresh = useSettings().refresh()
+      expect(releases).toHaveLength(2)
+      releases[0]({ data: { location: { configured: true }, display: {} } })
+      await flushPromises()
+      expect(wrapper.getComponent({ name: 'SetupWizard' }).props('isVisible')).toBe(false)
+
+      releases[1]({ data: { location: { configured: true }, display: {} } })
+      await refresh
+      await vi.advanceTimersByTimeAsync(10000)
+      expect(wrapper.getComponent({ name: 'SetupWizard' }).props('isVisible')).toBe(false)
+      expect(useAppStatus().locationConfigured.value).toBe(true)
+      expect(releases).toHaveLength(2)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   describe('settings bootstrap failure', () => {
     const settingsCalls = () =>
       mockApi.get.mock.calls.filter(([url]) => url === '/settings').length

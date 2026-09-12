@@ -6,6 +6,7 @@ from global state and external services.
 """
 import os
 import tempfile
+import wave
 from queue import Queue
 from unittest.mock import Mock, patch
 
@@ -78,8 +79,9 @@ def create_test_wav_file(temp_recording_dir):
 
     def _create_file(filename, size_bytes):
         file_path = os.path.join(temp_recording_dir, filename)
-        with open(file_path, 'wb') as f:
-            f.write(b'\x00' * size_bytes)
+        with wave.open(file_path, 'wb') as f:
+            f.setparams((1, 2, 48000, 0, 'NONE', 'not compressed'))
+            f.writeframes(b'\x00' * size_bytes)
         created_files.append(file_path)
         return file_path
 
@@ -193,8 +195,9 @@ def create_valid_wav_file(temp_recording_dir):
         # 48000 Hz * 2 bytes (16-bit) * duration
         size_bytes = 48000 * 2 * duration_seconds
         file_path = os.path.join(temp_recording_dir, filename)
-        with open(file_path, 'wb') as f:
-            f.write(b'\x00' * size_bytes)
+        with wave.open(file_path, 'wb') as f:
+            f.setparams((1, 2, 48000, 0, 'NONE', 'not compressed'))
+            f.writeframes(b'\x00' * size_bytes)
         return file_path
 
     return _create_file

@@ -155,7 +155,7 @@ def _write_user_settings_file(settings):
 _SUPERSEDED_MIN_DBFS = (-120, -90)
 
 
-def _migrate_spectrogram_floor(settings, user_data):
+def _migrate_spectrogram_floor(settings, user_data, *, persist=True):
     """Reset a stale persisted spectrogram floor to the current default.
 
     Rewrites only the single min_dbfs key in the user file (not the full default
@@ -170,10 +170,11 @@ def _migrate_spectrogram_floor(settings, user_data):
     saved['min_dbfs'] = current_default
     logger.info("Reset stale spectrogram floor to current default",
                 extra={'min_dbfs': current_default})
-    _write_user_settings_file(user_data)
+    if persist:
+        _write_user_settings_file(user_data)
 
 
-def _migrate_audio_sources(settings):
+def _migrate_audio_sources(settings, *, persist=True):
     """Migrate old audio format (recording_mode/rtsp_url/rtsp_urls) to sources array.
 
     Detects old-format keys and converts them to the sources array format.
@@ -256,10 +257,11 @@ def _migrate_audio_sources(settings):
                 extra={'source_count': len(sources)})
 
     # Write migrated settings back to disk
-    _write_user_settings_file(settings)
+    if persist:
+        _write_user_settings_file(settings)
 
 
-def load_user_settings():
+def load_user_settings(*, strict=False, persist_migrations=True):
     """Load user settings from JSON file, merged with defaults."""
     defaults = get_default_settings()
 
@@ -267,12 +269,16 @@ def load_user_settings():
         try:
             with open(USER_SETTINGS_PATH) as f:
                 user_data = json.load(f)
+                if not isinstance(user_data, dict):
+                    raise ValueError('Settings must be a JSON object')
                 for key in defaults:
                     if key in user_data:
                         if isinstance(defaults[key], dict):
                             if isinstance(user_data[key], dict):
                                 defaults[key].update(user_data[key])
                             else:
+                                if strict:
+                                    raise ValueError(f'{key} must be a JSON object')
                                 print(f"Settings: ignoring non-dict value for '{key}' (expected dict)")
                         else:
                             if isinstance(user_data[key], type(defaults[key])):
@@ -284,20 +290,46 @@ def load_user_settings():
 
                 # Reset a stale spectrogram floor before the audio migration so
                 # the audio migration's full write (if any) carries the fix too.
-                _migrate_spectrogram_floor(defaults, user_data)
+                _migrate_spectrogram_floor(defaults, user_data, persist=persist_migrations)
 
                 # Migrate old audio format to sources array
-                _migrate_audio_sources(defaults)
+                _migrate_audio_sources(defaults, persist=persist_migrations)
 
+                # Old documents may omit the ID allocator and nested defaults.
+                audio = defaults['audio']
+                source_ids = [int(s['id'].split('_')[1]) for s in audio.get('sources', [])
+                              if isinstance(s, dict) and isinstance(s.get('id'), str)
+                              and s['id'].startswith('source_') and s['id'][7:].isascii()
+                              and s['id'][7:].isdigit()]
+                if 'next_source_id' not in user_data.get('audio', {}):
+                    audio['next_source_id'] = max(source_ids, default=-1) + 1
+                for section, values in DEFAULT_SETTINGS.items():
+                    if isinstance(values, dict):
+                        defaults[section] = {k: v for k, v in defaults[section].items() if k in values}
+                if defaults['updates']['channel'] == 'stable':
+                    defaults['updates']['channel'] = 'release'
+                if defaults['display']['time_format'] == 'auto':
+                    defaults['display']['time_format'] = None
+                schedule = defaults.get('schedule', {})
+                quiet = schedule.get('quiet_hours')
+                if isinstance(quiet, dict):
+                    schedule['quiet_hours'] = {**DEFAULT_SETTINGS['schedule']['quiet_hours'], **quiet}
+                if strict:
+                    from core.settings_validation import validate_settings
+                    error = validate_settings(defaults)
+                    if error:
+                        raise ValueError(error)
                 return defaults
         except Exception as e:
+            if strict:
+                raise ValueError("Unable to read saved settings") from e
             print(f"Error loading user settings: {e}, using defaults")
 
     return defaults
 
 
 # Load settings on module import
-user_settings = load_user_settings()
+user_settings = load_user_settings(persist_migrations=False)
 
 # ── Services ──────────────────────────────────────────────────────────────────
 

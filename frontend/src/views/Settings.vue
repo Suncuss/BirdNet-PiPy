@@ -17,16 +17,52 @@
         class="shrink-0 ml-4"
         :loading="loading"
         loading-text="Saving..."
-        :disabled="serviceRestart.isRestarting.value || systemUpdate.isRestarting.value || systemUpdate.updating.value || quietHoursSaving"
+        :disabled="!loaded || serviceRestart.isRestarting.value || systemUpdate.isRestarting.value || systemUpdate.updating.value || quietHoursSaving || sourceSaving"
         @click="saveSettings"
       >
-        Save
+        {{ modelChanged ? 'Save and restart' : 'Save' }}
         <span
           v-if="hasUnsavedChanges"
           class="ml-1.5 w-2 h-2 bg-orange-500 rounded-full inline-block"
         />
       </AppButton>
     </div>
+
+    <div
+      v-if="loadError"
+      class="mb-4 text-sm text-red-700"
+      role="alert"
+    >
+      {{ loadError }}
+      <button
+        class="underline ml-2"
+        @click="loadSettings()"
+      >
+        Retry loading
+      </button>
+    </div>
+    <div
+      v-if="currentApplicationStatus?.model?.restart_required"
+      class="mb-4 p-3 rounded-lg bg-amber-50 text-amber-900 text-sm"
+      data-testid="settings-pending-restart"
+    >
+      The saved model is waiting for a service restart.
+      Saved: {{ modelName(currentApplicationStatus.model.requested) }}.
+      Active: {{ modelName(currentApplicationStatus.model.active) }}.
+      <button
+        class="underline ml-2"
+        :disabled="settingsStore.pendingWrites.value > 0 || serviceRestart.isRestarting.value || systemUpdate.updating.value"
+        @click="manualRestart"
+      >
+        Restart to apply
+      </button>
+    </div>
+    <p
+      v-else-if="loaded && modelUnreported"
+      class="mb-4 text-sm text-gray-500"
+    >
+      Saved settings loaded. Waiting for services to report the active model.
+    </p>
 
     <!-- Error Banner (save errors or restart errors) -->
     <AlertBanner
@@ -105,28 +141,44 @@
       </div>
     </div>
 
-    <div
+    <fieldset
       v-if="loaded"
       class="space-y-4"
+      :disabled="loading || serviceRestart.isRestarting.value || systemUpdate.isRestarting.value"
     >
       <!-- Location & Audio -->
       <div class="bg-white rounded-lg shadow-sm border border-gray-100 p-5">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="text-base font-medium text-gray-800">
+        <div class="flex items-start justify-between gap-3 mb-3">
+          <h2 class="shrink-0 text-base font-medium text-gray-800">
             Location & Audio
           </h2>
           <div
-            v-if="recorderStatus"
-            class="flex items-center gap-1.5"
+            class="flex items-center justify-end gap-1.5 max-w-[60%] text-right"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            :aria-busy="settingsStatusLoading"
+            data-testid="audio-status-summary"
           >
-            <span
-              class="w-1.5 h-1.5 rounded-full flex-shrink-0"
-              :class="recorderDotClass"
-            />
-            <span
-              class="text-xs font-medium"
-              :class="recorderStateLabelClass"
-            >{{ recorderStateLabel }}</span>
+            <template v-if="settingsStatusLoading">
+              <span
+                class="h-4 w-24 rounded bg-gray-200 animate-pulse motion-reduce:animate-none"
+                aria-hidden="true"
+                data-testid="audio-status-skeleton"
+              />
+              <span class="sr-only">Loading audio status</span>
+            </template>
+            <template v-else>
+              <span
+                class="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                :class="audioStatusStyle.dot"
+                aria-hidden="true"
+              />
+              <span
+                class="text-xs font-medium"
+                :class="audioStatusStyle.text"
+              >{{ audioStatus.label }}</span>
+            </template>
           </div>
         </div>
         <div class="flex gap-3">
@@ -177,7 +229,7 @@
         <label class="block text-sm text-gray-600 mb-1">Sources<span
           v-if="hasInactiveSource"
           class="text-xs text-gray-400 font-normal"
-        > — highlighted sources are active</span></label>
+        > — highlighted sources are enabled</span></label>
         <div class="flex flex-wrap gap-2">
           <!-- Source pills (click to edit) -->
           <button
@@ -185,9 +237,12 @@
             :key="source.id"
             type="button"
             class="group inline-flex items-center rounded-full border cursor-pointer transition-all duration-200"
-            :class="isSourceEnabled(source)
-              ? 'border-blue-300 bg-blue-50 hover:bg-blue-100 shadow-sm'
-              : 'border-gray-200 bg-gray-50 hover:bg-gray-100 opacity-50'"
+            :class="[isSourceEnabled(source)
+                       ? 'border-blue-300 bg-blue-50 hover:bg-blue-100 shadow-sm'
+                       : 'border-gray-200 bg-gray-50 hover:bg-gray-100 opacity-50',
+                     { 'source-changing': isSourceChanging(source.id) }]"
+            :data-source-id="source.id"
+            :aria-label="`${source.label || source.id}, ${isSourceEnabled(source) ? 'enabled' : 'disabled'}${isSourceChanging(source.id) ? ', updating' : ''}. Click to edit.`"
             title="Click to edit"
             @click="openEditSource(source.id)"
           >
@@ -251,62 +306,17 @@
           v-if="showStreamModal"
           :source="editingSource"
           :existing-sources="settings.audio.sources || []"
+          :saving="sourceSaving"
+          :save-error="settingsSaveError"
+          :audio-status="sourceStatuses[editingSource?.id]"
+          :status-loading="settingsStatusLoading"
+          :recording-error="editingRecordingError"
+          :streaming-error="editingStreamingError"
           @close="showStreamModal = false"
           @add="handleStreamAdd"
           @save="handleStreamSave"
           @delete="handleStreamDelete"
         />
-
-        <!-- Error details (only when source is unhealthy) -->
-        <details
-          v-if="showRecorderError"
-          open
-          class="mt-2.5"
-        >
-          <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-600 select-none">
-            <span class="show-label">Show error details</span>
-            <span class="hide-label">Hide error details</span>
-          </summary>
-          <div class="mt-1 space-y-1.5 relative group">
-            <div
-              v-for="(err, idx) in sourceErrors"
-              :key="idx"
-            >
-              <span
-                class="text-xs font-medium"
-                :class="err.state === RECORDER_STATES.STOPPED ? 'text-red-400' : 'text-amber-500'"
-              >{{ err.label }}</span>
-              <pre class="text-xs text-gray-500 bg-gray-50 rounded-md p-2 overflow-x-auto whitespace-pre-wrap break-words font-mono">{{ err.message }}</pre>
-            </div>
-            <button
-              class="absolute top-0 right-0 p-1 rounded text-gray-300 hover:text-gray-500 hover:bg-gray-100 transition-colors"
-              title="Copy to clipboard"
-              @click="copyErrorToClipboard"
-            >
-              <svg
-                class="w-3.5 h-3.5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  v-if="!errorCopied"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                />
-                <path
-                  v-else
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M5 13l4 4L19 7"
-                />
-              </svg>
-            </button>
-          </div>
-        </details>
       </div>
 
       <!-- Storage -->
@@ -1297,7 +1307,7 @@
           {{ systemUpdate.statusMessage.value }}
         </div>
       </div>
-    </div>
+    </fieldset>
 
     <!-- Cold-load skeleton: shown only on a genuine first load (no cached
          settings yet). The warm path seeds the form before paint, so this
@@ -1606,14 +1616,16 @@ import { useUnitSettings } from '@/composables/useUnitSettings'
 import { useTimeFormat } from '@/composables/useTimeFormat'
 import { useAppStatus } from '@/composables/useAppStatus'
 import { useSettings } from '@/composables/useSettings'
+import { acknowledgeSettings, changedSettings, cloneSettings, mergeSettings } from '@/utils/settingsPatch'
 import { useModalDismiss } from '@/composables/useModalDismiss'
 import { useRecorderHealth } from '@/composables/useRecorderHealth'
 import { limitDecimals } from '@/utils/inputHelpers'
 import { recordingSegment } from '@/utils/detectionLinks'
 import { FILTER_DEFAULTS, modelTypeOptions } from '@/utils/modelDefaults'
-import { RECORDER_STATES, pausedLabel } from '@/utils/recorderStates'
+import { isSourceEnabled, sourceAudioStatus, sourceIsChanging, streamingError, summarizeAudioStatus } from '@/utils/audioStatus'
 import { QUIET_HOURS_DEFAULTS, describeQuietHours, parseHHMM } from '@/utils/quietHours'
 import api, { createLongRequest } from '@/services/api'
+import { supersededSettingsRevision } from '@/services/settingsWrites'
 import SpeciesFilterModal from '@/components/SpeciesFilterModal.vue'
 import AlertBanner from '@/components/AlertBanner.vue'
 import AppButton from '@/components/AppButton.vue'
@@ -1632,6 +1644,15 @@ import CloseIcon from '@/components/icons/CloseIcon.vue'
 import { SCHEME_TO_SERVICE_NAME } from '@/utils/notificationServices'
 
 const DEFAULT_REPOSITORY_URL = 'https://github.com/Suncuss/BirdNET-PiPy'
+
+const AUDIO_STATUS_STYLES = {
+  healthy: { dot: 'bg-green-500', text: 'text-green-600' },
+  updating: { dot: 'bg-blue-400', text: 'text-blue-600' },
+  disabled: { dot: 'bg-gray-300', text: 'text-gray-500' },
+  paused: { dot: 'bg-blue-400', text: 'text-blue-600' },
+  issue: { dot: 'bg-red-500', text: 'text-red-600' },
+  unknown: { dot: 'bg-gray-300', text: 'text-gray-500' }
+}
 
 export default {
   name: 'Settings',
@@ -1702,6 +1723,7 @@ export default {
     // body and the empty-state hints so nothing derived from the empty draft
     // skeleton (e.g. "recording is paused") flashes before real data arrives.
     const loaded = ref(false)
+    const loadError = ref('')
     const saveStatus = ref(null)
     const settingsSaveError = ref('')
     const showUpdateConfirm = ref(false)
@@ -1710,29 +1732,42 @@ export default {
     // Storage state
     const storage = ref(null)
 
-    // Recorder health status — owned by useRecorderHealth (REST for an
-    // immediate value, socket for everything after), so this badge and the
-    // app-wide status pill can never disagree.
+    // One settings-status snapshot confirms recording, live streaming, pause
+    // and per-source errors, all from the same acknowledged revision.
     const recorderHealth = useRecorderHealth()
-    const recorderStatus = recorderHealth.recorderStatus
-    const modelStatus = ref(null)
-    const errorCopied = ref(false)
-    let modelStatusRetryTimer = null
-    let modelStatusPollingStopped = false
+    const applicationStatus = recorderHealth.settingsStatus
+    const settingsStatusLoading = recorderHealth.settingsStatusLoading
+    const modelName = (type) => modelTypeOptions.find(option => option.value === type)?.title || 'Status unavailable'
+    let viewStopped = false
+    let settingsRetryTimer = null
+    let unwatchSettingsStatus = () => {}
 
     // Stream source modal state
     const showStreamModal = ref(false)
     const editingSource = ref(null)
+    const sourceSaving = ref(false)
+    const currentApplicationStatus = computed(() => {
+      if (serviceRestart.isRestarting.value || systemUpdate.isRestarting.value) return null
+      const status = applicationStatus.value
+      return settingsStore.revision.value && status?.revision !== settingsStore.revision.value ? null : status
+    })
+    const modelStatus = computed(() => currentApplicationStatus.value?.model_service || null)
+    const modelUnreported = computed(() => !settingsStatusLoading.value && modelStatus.value?.status !== 'loading' &&
+      currentApplicationStatus.value?.model?.state !== 'active')
+    const savedSources = computed(() => settingsStore.settings.value?.audio?.sources || [])
+    const sourceStatuses = computed(() => Object.fromEntries(savedSources.value.map(source =>
+      [source.id, sourceAudioStatus(currentApplicationStatus.value, source.id)])))
+    const isSourceChanging = (id) => sourceIsChanging(sourceStatuses.value[id] || {})
+    const audioStatus = computed(() => summarizeAudioStatus(
+      savedSources.value, currentApplicationStatus.value, timeFormatSettings.formatTime))
+    const audioStatusStyle = computed(() => AUDIO_STATUS_STYLES[audioStatus.value.state])
+    const editingRecordingError = computed(() =>
+      currentApplicationStatus.value?.sources?.[editingSource.value?.id]?.error || '')
+    const editingStreamingError = computed(() => streamingError(currentApplicationStatus.value))
 
     const hasMicSource = computed(() =>
       (settings.value.audio.sources || []).some(s => s.type === 'pulseaudio')
     )
-
-    // Matches recording_schedule.enabled_sources(): a source saved before the
-    // toggle existed has no `enabled` key and is recorded. Reading this as
-    // truthiness would show "recording is paused" for a station that is in fact
-    // recording.
-    const isSourceEnabled = (source) => source?.enabled !== false
 
     // Legend for the source pills: only meaningful while some are highlighted
     // and some are not.
@@ -1750,24 +1785,8 @@ export default {
       const sources = settings.value.audio?.sources || []
       if (sources.some(isSourceEnabled)) return ''
       return sources.length
-        ? 'No active source — recording is paused. Enable a source to resume.'
-        : 'No audio source — recording is paused. Add a source to start.'
-    })
-
-    const sourceErrors = computed(() => {
-      const sources = recorderStatus.value?.sources
-      if (!sources) return []
-      return Object.values(sources)
-        .filter(s => s.state !== RECORDER_STATES.RUNNING && s.last_error_message)
-        .map(s => ({ label: s.label, state: s.state, message: s.last_error_message }))
-    })
-
-    const showRecorderError = computed(() => {
-      if (!recorderStatus.value) return false
-      if (serviceRestart.isRestarting.value) return false
-      if (recorderStatus.value.state === RECORDER_STATES.RUNNING) return false
-      if (recorderStatus.value.state === RECORDER_STATES.PAUSED) return false
-      return sourceErrors.value.length > 0
+        ? 'Enable a source to resume recording.'
+        : 'Add a source to start recording.'
     })
 
     const locationFilterWarning = computed(() => {
@@ -1776,66 +1795,6 @@ export default {
       return status.message ||
         'Location filtering is unavailable. Acoustic detections are continuing without location filtering; check System Logs for details.'
     })
-
-    const recorderDotClass = computed(() => {
-      if (serviceRestart.isRestarting.value) return 'bg-gray-300'
-      const state = recorderStatus.value?.state
-      if (state === RECORDER_STATES.RUNNING) return 'bg-green-500 animate-pulse'
-      if (state === RECORDER_STATES.DEGRADED) return 'bg-amber-500'
-      if (state === RECORDER_STATES.STOPPED) return 'bg-red-500'
-      if (state === RECORDER_STATES.PAUSED) return 'bg-blue-400'
-      return 'bg-gray-300'
-    })
-
-    const recorderStateLabel = computed(() => {
-      if (serviceRestart.isRestarting.value) return 'Unavailable'
-      const state = recorderStatus.value?.state
-      if (state === RECORDER_STATES.RUNNING) return 'Audio Healthy'
-      if (state === RECORDER_STATES.DEGRADED) return 'Audio Degraded'
-      if (state === RECORDER_STATES.STOPPED) return 'Audio Stopped'
-      if (state === RECORDER_STATES.PAUSED) {
-        return pausedLabel(recorderStatus.value?.pause, timeFormatSettings.formatTime)
-      }
-      return 'Audio Unknown'
-    })
-
-    const recorderStateLabelClass = computed(() => {
-      if (serviceRestart.isRestarting.value) return 'text-gray-400'
-      const state = recorderStatus.value?.state
-      if (state === RECORDER_STATES.RUNNING) return 'text-green-600'
-      if (state === RECORDER_STATES.DEGRADED) return 'text-amber-600'
-      if (state === RECORDER_STATES.STOPPED) return 'text-red-600'
-      if (state === RECORDER_STATES.PAUSED) return 'text-blue-600'
-      return 'text-gray-400'
-    })
-
-    let errorCopiedTimer = null
-
-    const copyErrorToClipboard = async () => {
-      const errors = sourceErrors.value
-      if (!errors.length) return
-      const msg = errors.map(e => `[${e.label}] ${e.message}`).join('\n\n')
-      try {
-        // navigator.clipboard requires HTTPS; fall back for plain HTTP
-        if (navigator.clipboard && window.isSecureContext) {
-          await navigator.clipboard.writeText(msg)
-        } else {
-          const ta = document.createElement('textarea')
-          ta.value = msg
-          ta.style.position = 'fixed'
-          ta.style.left = '-9999px'
-          document.body.appendChild(ta)
-          ta.select()
-          document.execCommand('copy')
-          document.body.removeChild(ta)
-        }
-        errorCopied.value = true
-        if (errorCopiedTimer) clearTimeout(errorCopiedTimer)
-        errorCopiedTimer = setTimeout(() => { errorCopied.value = false }, 2000)
-      } catch (err) {
-        console.warn('Clipboard copy failed:', err)
-      }
-    }
 
     // Export state
     const exporting = ref(false)
@@ -1963,6 +1922,7 @@ export default {
 
     // Unsaved changes tracking
     const originalSettings = ref(null)
+    const modelChanged = computed(() => originalSettings.value && settings.value.model?.type !== originalSettings.value.model?.type)
     const showUnsavedModal = ref(false)
     const navigationResolver = ref(null)
 
@@ -2000,6 +1960,7 @@ export default {
       if (!originalSettings.value) return false
       return JSON.stringify(getComparableSettings(settings.value)) !== JSON.stringify(originalSettings.value)
     })
+    const hasOpenSettingsDialog = computed(() => showStreamModal.value || showSpeciesFilterModal.value)
 
     // Recording normalization toggle — saves immediately, no restart needed.
     // The main container reads playback.normalize when it saves each clip, so
@@ -2009,10 +1970,10 @@ export default {
       try {
         playbackNormalizeSaving.value = true
         if (!settings.value.playback) settings.value.playback = {}
-        await api.put('/settings/playback', { normalize: value })
+        await settingsStore.write('/settings/playback', { normalize: value })
         settings.value.playback.normalize = value
         settingsStore.patchSettings({ playback: { normalize: value } })
-        showStatus('success', 'Settings applied.')
+        showStatus('success', 'Settings saved.')
       } catch (error) {
         console.error('Error saving normalization setting:', error)
         showStatus('error', 'Failed to save normalization setting')
@@ -2053,12 +2014,12 @@ export default {
       if (quietHoursSaving.value) return false
       try {
         quietHoursSaving.value = true
-        const { data } = await api.put('/settings/schedule', { quiet_hours: patch })
+        const { data } = await settingsStore.write('/settings/schedule', { quiet_hours: patch })
         if (!settings.value.schedule) settings.value.schedule = {}
         const savedQuietHours = data?.quiet_hours || { ...quietHours.value, ...patch }
         settings.value.schedule.quiet_hours = savedQuietHours
         settingsStore.patchSettings({ schedule: { quiet_hours: savedQuietHours } })
-        showStatus('success', 'Settings applied.')
+        showStatus('success', 'Settings saved.')
         return true
       } catch (error) {
         console.error('Error saving quiet hours:', error)
@@ -2121,26 +2082,6 @@ export default {
         storage.value = data
       } catch (error) {
         console.error('Error loading storage info:', error)
-      }
-    }
-
-    const scheduleModelStatusRetry = () => {
-      if (modelStatusPollingStopped || modelStatusRetryTimer) return
-      modelStatusRetryTimer = setTimeout(() => {
-        modelStatusRetryTimer = null
-        if (!modelStatusPollingStopped) loadModelStatus()
-      }, 5000)
-    }
-
-    const loadModelStatus = async () => {
-      try {
-        const { data } = await api.get('/model/status')
-        if (modelStatusPollingStopped) return
-        modelStatus.value = data
-        if (data?.status === 'unavailable') scheduleModelStatusRetry()
-      } catch (error) {
-        console.warn('Model status fetch failed:', error)
-        scheduleModelStatusRetry()
       }
     }
 
@@ -2266,42 +2207,41 @@ export default {
       loaded.value = true
     }
 
-    // Load settings from API with retry and fallback to defaults
+    // Never substitute defaults for an unreadable saved configuration.
     const loadSettings = async (retryCount = 0, initialDraft = JSON.stringify(settings.value)) => {
+      if (viewStopped) return
       try {
         loading.value = true
         // useSettings owns the /settings fetch and syncs display prefs.
         // Take an independent deep copy — the form mutates this draft.
         const ok = await settingsStore.refresh()
+        if (viewStopped) return
         if (!ok || !settingsStore.settings.value) {
           throw new Error('settings unavailable')
         }
+        loadError.value = ''
         if (saveStatus.value?.type === 'error') {
           saveStatus.value = null
         }
         // A warm form is editable while this request runs. Only replace it if
         // it is still byte-for-byte the draft we started with; otherwise keep
         // the user's changes and leave the refreshed payload in the store.
-        if (!loaded.value || JSON.stringify(settings.value) === initialDraft) {
+        // Open dialogs also need their original baseline for conflict checks,
+        // including when they opened while this request was already in flight.
+        if (!loaded.value || (!hasOpenSettingsDialog.value && JSON.stringify(settings.value) === initialDraft)) {
           adoptSettings(JSON.parse(JSON.stringify(settingsStore.settings.value)))
         }
       } catch (error) {
         console.error('Error loading settings:', error)
         if (retryCount < 2) {
-          setTimeout(() => loadSettings(retryCount + 1, initialDraft), 2000)
+          clearTimeout(settingsRetryTimer)
+          settingsRetryTimer = setTimeout(() => loadSettings(retryCount + 1, initialDraft), 2000)
         } else if (loaded.value) {
           // Revalidation failed, but the warm path already has a known-good
           // payload. Never replace that real configuration with defaults.
           showStatus('error', 'Could not refresh settings. Showing last loaded settings.')
         } else {
-          // Fallback to defaults on failure
-          try {
-            const { data } = await api.get('/settings/defaults')
-            adoptSettings(data)
-          } catch (defaultsErr) {
-            console.error('Failed to load defaults:', defaultsErr)
-            showStatus('error', 'Failed to load settings')
-          }
+          loadError.value = 'Saved settings could not be loaded. Editing is unavailable until loading succeeds.'
         }
       } finally {
         loading.value = false
@@ -2324,25 +2264,21 @@ export default {
       try {
         loading.value = true
         settingsSaveError.value = ''
-        settings.value.location.configured = true
-        const { data } = await api.put('/settings', settings.value)
-        // Apply server-computed fields (e.g. timezone from coordinates)
-        if (data.settings) {
-          settings.value = data.settings
-          // Keep the shared store in sync with the just-saved state.
-          settingsStore.setSettings(data.settings)
+        const patch = changedSettings(originalSettings.value, getComparableSettings(settings.value))
+        // A model change makes an omitted threshold use the server's default,
+        // so include the user's selection even if it matches the old value.
+        if (patch.model?.type) {
+          patch.detection = { ...patch.detection, species_filter_threshold: settings.value.detection.species_filter_threshold }
         }
-        // Update snapshot after successful save
-        takeSnapshot()
-        confirmedNotifications.value = cloneNotif()
+        if (!Object.keys(patch).length) return { changes: { changed_paths: [] } }
+        const { data } = await settingsStore.save(patch, { base: originalSettings.value })
+        acknowledgeSettings(settings.value, originalSettings.value, patch, data.settings || patch)
         return data
       } catch (error) {
         console.error('Error saving settings:', error)
         // 400s carry a user-facing validation message (e.g. a bad Site URL);
         // other failures get the generic retry message.
-        const validationError = error.response?.status === 400
-          ? error.response.data?.error
-          : null
+        const validationError = error.response?.data?.error || error.message
         settingsSaveError.value = validationError || 'Failed to save settings. Please try again.'
         return null
       } finally {
@@ -2387,7 +2323,7 @@ export default {
     }
 
     // Persist current settings to backend, handle restart if needed, show status
-    const persistAndRestart = async (statusMessage = 'Settings applied.') => {
+    const persistAndRestart = async (statusMessage = 'Settings saved.') => {
       const result = await saveSettingsOnly()
       if (result) {
         appStatus.setStationName(settings.value.display?.station_name)
@@ -2412,6 +2348,7 @@ export default {
     // Manual restart triggered from Management section
     const manualRestart = async () => {
       if (
+        settingsStore.pendingWrites.value > 0 ||
         serviceRestart.isRestarting.value ||
         systemUpdate.updating.value ||
         systemUpdate.isRestarting.value
@@ -2461,7 +2398,7 @@ export default {
         const newChannel = settings.value.updates.channel === 'latest' ? 'release' : 'latest'
 
         // Save immediately via dedicated endpoint (no restart needed)
-        await api.put('/settings/channel', { channel: newChannel })
+        await settingsStore.write('/settings/channel', { channel: newChannel })
         settings.value.updates.channel = newChannel
         settingsStore.patchSettings({ updates: { channel: newChannel } })
         showStatus('success', `Switched to ${newChannel === 'latest' ? 'latest' : 'release'} channel`)
@@ -2487,7 +2424,7 @@ export default {
           settings.value.display.time_format = target
           settingsStore.patchSettings({ display: { time_format: target } })
         }
-        showStatus(ok ? 'success' : 'error', ok ? 'Settings applied.' : 'Failed to save time format setting')
+        showStatus(ok ? 'success' : 'error', ok ? 'Settings saved.' : 'Failed to save time format setting')
       } finally {
         timeFormatSaving.value = false
       }
@@ -2502,7 +2439,7 @@ export default {
         const newValue = settings.value.display.use_metric_units === false
 
         // Save immediately via dedicated endpoint (no restart needed)
-        await api.put('/settings/units', { use_metric_units: newValue })
+        await settingsStore.write('/settings/units', { use_metric_units: newValue })
         settings.value.display.use_metric_units = newValue
         settingsStore.patchSettings({ display: { use_metric_units: newValue } })
 
@@ -2520,11 +2457,13 @@ export default {
 
     // Stream source modal actions
     const openAddSource = () => {
+      settingsSaveError.value = ''
       editingSource.value = null
       showStreamModal.value = true
     }
 
     const openEditSource = (sourceId) => {
+      settingsSaveError.value = ''
       const sources = settings.value.audio.sources || []
       const source = sources.find(s => s.id === sourceId)
       if (source) {
@@ -2533,37 +2472,47 @@ export default {
       showStreamModal.value = true
     }
 
-    const handleStreamAdd = async (source) => {
-      if (!settings.value.audio.sources) {
-        settings.value.audio.sources = []
+    const saveScopedSettings = async (patch) => {
+      const { data } = await settingsStore.save(patch, { base: originalSettings.value })
+      const saved = data.settings || patch
+      // These fields belong to the dialog; unrelated form edits stay untouched.
+      mergeSettings(settings.value, patch)
+      acknowledgeSettings(settings.value, originalSettings.value, patch, saved)
+      return data
+    }
+
+    const saveSources = async (audio) => {
+      if (sourceSaving.value) return
+      sourceSaving.value = true
+      settingsSaveError.value = ''
+      try {
+        await saveScopedSettings({ audio })
+        showStreamModal.value = false
+      } catch (error) {
+        settingsSaveError.value = error.response?.data?.error || error.message || 'Could not save source'
+      } finally {
+        sourceSaving.value = false
       }
+    }
+
+    const handleStreamAdd = async (source) => {
       const nextId = settings.value.audio.next_source_id || 0
-      source.id = `source_${nextId}`
-      source.enabled = true
-      settings.value.audio.sources.push(source)
-      settings.value.audio.next_source_id = nextId + 1
-      showStreamModal.value = false
-      await persistAndRestart('Source added')
+      await saveSources({
+        sources: [...cloneSettings(settings.value.audio.sources || []), { ...source, id: `source_${nextId}`, enabled: true }],
+        next_source_id: nextId + 1
+      })
     }
 
     const handleStreamSave = async ({ id, updates }) => {
-      const sources = settings.value.audio.sources || []
+      const sources = cloneSettings(settings.value.audio.sources || [])
       const source = sources.find(s => s.id === id)
-      if (source) {
-        Object.assign(source, updates)
-      }
-      showStreamModal.value = false
-      await persistAndRestart('Source updated')
+      if (!source) return
+      Object.assign(source, updates)
+      await saveSources({ sources })
     }
 
     const handleStreamDelete = async (sourceId) => {
-      const sources = settings.value.audio.sources || []
-      const index = sources.findIndex(s => s.id === sourceId)
-      if (index !== -1) {
-        sources.splice(index, 1)
-      }
-      showStreamModal.value = false
-      await persistAndRestart('Source removed')
+      await saveSources({ sources: (settings.value.audio.sources || []).filter(s => s.id !== sourceId) })
     }
 
     // Handle BirdWeather ID update
@@ -2590,7 +2539,7 @@ export default {
         settings.value.notifications.apprise_urls.push(url)
       }
       closeNotificationModal()
-      saveNotificationSettings()
+      saveNotificationSettings('apprise_urls')
     }
 
     // Handle URL updated from the edit modal (test already succeeded)
@@ -2608,7 +2557,7 @@ export default {
         urls[adjusted] = url
       }
       closeNotificationModal()
-      saveNotificationSettings()
+      saveNotificationSettings('apprise_urls')
     }
 
     // Handle delete triggered from edit modal — delegate to confirm modal
@@ -2624,11 +2573,17 @@ export default {
     const persistNotificationSettings = async (payload, seq) => {
       notifSaveInFlight += 1
       try {
-        await api.put('/settings/notifications', payload)
+        const options = 'apprise_urls' in payload ? {
+          base: { notifications: { apprise_urls: confirmedNotifications.value.apprise_urls } },
+          patch: { notifications: payload }
+        } : undefined
+        const { data } = await settingsStore.write('/settings/notifications', payload, options)
         if (seq > notifAppliedSeq) {
           notifAppliedSeq = seq
-          confirmedNotifications.value = JSON.parse(JSON.stringify(payload))
-          settingsStore.patchSettings({ notifications: payload })
+          confirmedNotifications.value = cloneSettings(data?.notifications || data?.settings?.notifications ||
+            { ...confirmedNotifications.value, ...payload })
+          settingsStore.patchSettings({ notifications: confirmedNotifications.value })
+          if (seq === notifSaveSeq) settings.value.notifications = cloneSettings(confirmedNotifications.value)
         }
       } catch {
         if (seq === notifSaveSeq) {
@@ -2640,8 +2595,8 @@ export default {
       }
     }
 
-    const saveNotificationSettings = () => {
-      const payload = cloneNotif()
+    const saveNotificationSettings = (field) => {
+      const payload = { [field]: cloneSettings(settings.value.notifications[field]) }
       const seq = ++notifSaveSeq
       return persistNotificationSettings(payload, seq)
     }
@@ -2649,21 +2604,21 @@ export default {
     // Toggle a notification boolean and autosave
     const toggleNotificationSetting = (field) => {
       settings.value.notifications[field] = !settings.value.notifications[field]
-      saveNotificationSettings()
+      saveNotificationSettings(field)
     }
 
     // Notification pill setters (save immediately on click)
     const setRateLimit = (value) => {
       settings.value.notifications.rate_limit_seconds = value
-      saveNotificationSettings()
+      saveNotificationSettings('rate_limit_seconds')
     }
     const setRareThreshold = (value) => {
       settings.value.notifications.rare_threshold = value
-      saveNotificationSettings()
+      saveNotificationSettings('rare_threshold')
     }
     const setRareWindow = (value) => {
       settings.value.notifications.rare_window_days = value
-      saveNotificationSettings()
+      saveNotificationSettings('rare_window_days')
     }
 
     const confirmRemoveAppriseUrl = () => {
@@ -2671,7 +2626,7 @@ export default {
       confirmRemoveIndex.value = null
       if (index !== null) {
         settings.value.notifications.apprise_urls.splice(index, 1)
-        saveNotificationSettings()
+        saveNotificationSettings('apprise_urls')
       }
     }
 
@@ -2764,20 +2719,12 @@ export default {
       }
     }
 
-    // Save species filter immediately (and restart if required)
+    // Species dialogs save only their own list, even with a model draft open.
     const saveSpeciesFilter = async (newList) => {
-      // Update the settings with the new list
-      updateFilterList(newList)
-
-      const result = await saveSettingsOnly()
-      if (!result) {
-        throw new Error('Failed to save species filter')
-      }
-
-      const restartTriggered = await triggerRestartIfRequired(result, 'Species filter saved — restarting services to apply')
-      if (!restartTriggered) {
-        showStatus('success', result?.message || 'Settings applied.')
-      }
+      const listKey = speciesFilterConfigs[currentFilterType.value]?.listKey
+      if (!listKey) return
+      await saveScopedSettings({ species_filter: { [listKey]: newList } })
+      showStatus('success', 'Species filter saved. Applies to the next analysis.')
     }
 
     // Export detections as CSV
@@ -2943,7 +2890,7 @@ export default {
             navigationResolver.value(true)
             navigationResolver.value = null
           }
-          showStatus('success', result?.message || 'Settings applied.')
+          showStatus('success', result?.message || 'Settings saved.')
         }
       }
       // On failure: modal stays open, error shown via settingsSaveError
@@ -2977,6 +2924,23 @@ export default {
       return true
     })
 
+    const refreshOnFocus = () => {
+      if (settingsStore.pendingWrites.value > 0) return
+      if (hasUnsavedChanges.value || hasOpenSettingsDialog.value) settingsStore.refresh()
+      else loadSettings()
+    }
+
+    // A save from another session changes the status revision before this
+    // tab's store hears about it, which would leave the audio summary
+    // unavailable until the window next regains focus. A status still on the
+    // revision this tab just moved past is its own save catching up, not that.
+    watch(() => applicationStatus.value?.revision, (revision) => {
+      if (!revision || !settingsStore.revision.value || revision === settingsStore.revision.value) return
+      if (revision === supersededSettingsRevision()) return
+      if (serviceRestart.isRestarting.value || systemUpdate.isRestarting.value) return
+      refreshOnFocus()
+    })
+
     // Load settings on component mount
     onMounted(() => {
       // Warm path: App.vue usually loaded /settings into the store at startup.
@@ -2987,29 +2951,42 @@ export default {
       if (settingsStore.settings.value) {
         adoptSettings(JSON.parse(JSON.stringify(settingsStore.settings.value)))
       }
+      unwatchSettingsStatus = recorderHealth.watchSettingsStatus()
       loadSettings()
       loadStorageInfo()
-      recorderHealth.checkStatus()
-      loadModelStatus()
       loadSpeciesList()
       systemUpdate.loadVersionInfo()
       auth.ensureAuthLoaded()
       window.addEventListener('beforeunload', handleBeforeUnload)
+      window.addEventListener('focus', refreshOnFocus)
     })
 
     // Cleanup on unmount
     onUnmounted(() => {
-      modelStatusPollingStopped = true
+      viewStopped = true
       window.removeEventListener('beforeunload', handleBeforeUnload)
-      if (errorCopiedTimer) clearTimeout(errorCopiedTimer)
-      if (modelStatusRetryTimer) {
-        clearTimeout(modelStatusRetryTimer)
-        modelStatusRetryTimer = null
-      }
+      window.removeEventListener('focus', refreshOnFocus)
+      clearTimeout(settingsRetryTimer)
+      unwatchSettingsStatus()
     })
 
     return {
       scrollToSystemUpdates,
+      settingsStatusLoading,
+      modelName,
+      settingsStore,
+      currentApplicationStatus,
+      modelUnreported,
+      sourceStatuses,
+      isSourceChanging,
+      audioStatus,
+      audioStatusStyle,
+      editingRecordingError,
+      editingStreamingError,
+      sourceSaving,
+      modelChanged,
+      loadError,
+      loadSettings,
       settings,
       loading,
       loaded,
@@ -3038,7 +3015,6 @@ export default {
       toggleQuietHours,
       saveQuietHoursTime,
       timeFormatSettings,
-      showRecorderError,
       limitDecimals,
       updateBirdweatherId,
       confirmUpdate,
@@ -3081,19 +3057,11 @@ export default {
       saveSpeciesFilter,
       getCommonName,
       // Recorder health
-      recorderStatus,
       modelStatus,
       locationFilterWarning,
-      recorderDotClass,
-      recorderStateLabel,
-      recorderStateLabelClass,
       isSourceEnabled,
       hasInactiveSource,
       noActiveSourceHint,
-      sourceErrors,
-      errorCopied,
-      copyErrorToClipboard,
-      RECORDER_STATES,
       // Audio source management
       hasMicSource,
       showStreamModal,
@@ -3142,6 +3110,20 @@ export default {
 </script>
 
   <style scoped>
+  .source-changing {
+    animation: source-change 2s ease-in-out infinite;
+    opacity: 1;
+  }
+
+  @keyframes source-change {
+    0%, 100% { background-color: theme('colors.gray.100'); border-color: theme('colors.gray.300'); }
+    50% { background-color: theme('colors.blue.100'); border-color: theme('colors.blue.300'); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .source-changing { animation: none; }
+  }
+
   /* Custom range slider styling - cross-browser */
   input[type="range"] {
     -webkit-appearance: none;
@@ -3196,9 +3178,4 @@ export default {
     background-color: theme('colors.blue.700');
   }
 
-  /* Toggle show/hide label based on details open state */
-  details .hide-label { display: none; }
-  details .show-label { display: inline; }
-  details[open] .hide-label { display: inline; }
-  details[open] .show-label { display: none; }
   </style>

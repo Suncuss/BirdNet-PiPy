@@ -625,11 +625,20 @@ export default {
       }
     }
 
+    let streamConfigTimer = null
+    let streamConfigLoading = false
+    let streamConfigStopped = false
     const fetchStreamConfig = async () => {
+      if (streamConfigLoading || streamConfigStopped) return
+      streamConfigLoading = true
       try {
         const { data: config } = await api.get('/stream/config')
+        if (streamConfigStopped) return
         streams.value = config.streams || []
-        selectedSourceId.value = streams.value[0]?.source_id || ''
+        if (!streams.value.some(s => s.source_id === selectedSourceId.value)) {
+          if (selectedSourceId.value) await stopAudio()
+          selectedSourceId.value = streams.value[0]?.source_id || ''
+        }
 
         if (!streamUrl.value) {
           statusMessage.value = 'No audio stream configured'
@@ -637,6 +646,8 @@ export default {
       } catch (error) {
         console.error(`[LiveFeed] Stream config fetch failed: ${error.message}`)
         showError('Could not load stream settings')
+      } finally {
+        streamConfigLoading = false
       }
     }
 
@@ -716,6 +727,7 @@ export default {
     }
 
     onMounted(async () => {
+      streamConfigTimer = setInterval(fetchStreamConfig, 5000)
       window.addEventListener('auth:logged-out', handleLoggedOut)
       // Kick off the stream-config fetch now — it doesn't depend on the Safari
       // decoder probe below, so the two (and on Safari a ~80 kB decoder-chunk
@@ -753,6 +765,8 @@ export default {
     })
 
     onUnmounted(() => {
+      streamConfigStopped = true
+      clearInterval(streamConfigTimer)
       window.removeEventListener('auth:logged-out', handleLoggedOut)
       userWantsPlay = false
       cancelReconnect()

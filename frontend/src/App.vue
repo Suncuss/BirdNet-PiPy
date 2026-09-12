@@ -109,8 +109,8 @@
     </main>
 
     <!-- Status FAB — priority: recorder fault, then an intentional pause,
-         then an available update; hidden on Settings (whose own badge says
-         the same) and while a page-level scroll-to-top button occupies the
+         then an available update; hidden on Settings (which has its own
+         audio summary) and while a page-level scroll-to-top button occupies the
          corner. STATUS_FAB_CLASS holds the shared geometry; each pill adds
          only its colour. -->
     <template v-if="statusFabAllowed">
@@ -285,7 +285,7 @@ export default {
     const checkLocationSetup = async () => {
       // useSettings owns the fetch and syncs unit / time-format prefs.
       const ok = await appSettings.ensureLoaded()
-      if (!ok) {
+      if (!ok || !appSettings.settings.value) {
         // A network error says nothing about whether location is configured.
         // Assume the common case (configured) so the dashboard starts
         // fetching — its data doesn't need settings and it shows its own
@@ -306,7 +306,7 @@ export default {
       const settings = appSettings.settings.value
       setStationName(settings?.display?.station_name)
       // Show setup modal if location has not been configured
-      if (!settings?.location?.configured) {
+      if (settings?.location?.configured === false) {
         logger.info('Location not configured, showing setup wizard')
         setLocationConfigured(false)
         showSetupWizard.value = true

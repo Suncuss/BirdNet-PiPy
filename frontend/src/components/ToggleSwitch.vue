@@ -1,5 +1,6 @@
 <template>
   <button
+    type="button"
     role="switch"
     :aria-checked="modelValue"
     :disabled="disabled"

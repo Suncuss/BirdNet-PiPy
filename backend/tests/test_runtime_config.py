@@ -12,7 +12,7 @@ def _make_settings(sources):
 
 
 class TestClassifySettingChanges:
-    def test_schedule_is_hot_applied(self):
+    def test_schedule_is_hot_reload_paths(self):
         """schedule.* must stay hot-applied: the main container re-evaluates
         quiet hours from the settings file every recorder tick (no restart)."""
         paths = ["schedule.quiet_hours.enabled", "schedule.quiet_hours.start"]
@@ -21,7 +21,7 @@ class TestClassifySettingChanges:
 
         assert plan["full_restart_required"] is False
         assert plan["component_restarts"] == []
-        assert plan["hot_applied"] == paths
+        assert plan["hot_reload_paths"] == paths
 
     def test_model_switch_requires_full_restart(self):
         plan = classify_setting_changes(["model.type"])
@@ -29,23 +29,23 @@ class TestClassifySettingChanges:
         assert plan["full_restart_required"] is True
         assert "model.type" in plan["full_restart_paths"]
 
-    def test_audio_overlap_is_component_restart_only(self):
+    def test_audio_overlap_reloads_at_next_analysis(self):
         plan = classify_setting_changes(["audio.overlap"])
 
         assert plan["full_restart_required"] is False
-        assert "audio.overlap" in plan["component_restarts"]
+        assert "audio.overlap" in plan["hot_reload_paths"]
 
-    def test_audio_sources_change_requires_full_restart(self):
+    def test_audio_sources_reconnect_independently(self):
         plan = classify_setting_changes(["audio.sources.0.enabled"])
 
-        assert plan["full_restart_required"] is True
-        assert "audio.sources.0.enabled" in plan["full_restart_paths"]
+        assert plan["full_restart_required"] is False
+        assert "audio.sources.0.enabled" in plan["component_restarts"]
 
-    def test_audio_next_source_id_requires_full_restart(self):
+    def test_audio_next_source_id_needs_no_restart(self):
         plan = classify_setting_changes(["audio.next_source_id"])
 
-        assert plan["full_restart_required"] is True
-        assert "audio.next_source_id" in plan["full_restart_paths"]
+        assert plan["full_restart_required"] is False
+        assert "audio.next_source_id" in plan["hot_reload_paths"]
 
     def test_audio_recording_length_is_component_restart(self):
         plan = classify_setting_changes(["audio.recording_length"])
@@ -53,20 +53,20 @@ class TestClassifySettingChanges:
         assert plan["full_restart_required"] is False
         assert "audio.recording_length" in plan["component_restarts"]
 
-    def test_location_change_is_hot_applied(self):
+    def test_location_change_is_hot_reload_paths(self):
         """Location is read live from config — no restart needed."""
         plan = classify_setting_changes(["location.latitude", "location.longitude", "location.timezone"])
 
         assert plan["full_restart_required"] is False
-        assert "location.latitude" in plan["hot_applied"]
-        assert "location.longitude" in plan["hot_applied"]
-        assert "location.timezone" in plan["hot_applied"]
+        assert "location.latitude" in plan["hot_reload_paths"]
+        assert "location.longitude" in plan["hot_reload_paths"]
+        assert "location.timezone" in plan["hot_reload_paths"]
 
 
 class TestSourceLabelOnlyChanges:
     """Tests for label-only source edits skipping restart."""
 
-    def test_label_only_change_is_hot_applied(self):
+    def test_label_only_change_is_hot_reload_paths(self):
         old = _make_settings([
             {"id": "source_0", "type": "pulseaudio", "device": "default", "label": "Old Name"}
         ])
@@ -77,7 +77,7 @@ class TestSourceLabelOnlyChanges:
         plan = classify_setting_changes(["audio.sources"], old, new)
 
         assert plan["full_restart_required"] is False
-        assert "audio.sources" in plan["hot_applied"]
+        assert "audio.sources" in plan["hot_reload_paths"]
 
     def test_label_change_with_url_change_requires_restart(self):
         old = _make_settings([
@@ -89,8 +89,8 @@ class TestSourceLabelOnlyChanges:
 
         plan = classify_setting_changes(["audio.sources"], old, new)
 
-        assert plan["full_restart_required"] is True
-        assert "audio.sources" in plan["full_restart_paths"]
+        assert plan["full_restart_required"] is False
+        assert "audio.sources" in plan["component_restarts"]
 
     def test_label_change_with_device_change_requires_restart(self):
         old = _make_settings([
@@ -102,7 +102,7 @@ class TestSourceLabelOnlyChanges:
 
         plan = classify_setting_changes(["audio.sources"], old, new)
 
-        assert plan["full_restart_required"] is True
+        assert plan["full_restart_required"] is False
 
     def test_source_added_requires_restart(self):
         old = _make_settings([
@@ -115,7 +115,7 @@ class TestSourceLabelOnlyChanges:
 
         plan = classify_setting_changes(["audio.sources"], old, new)
 
-        assert plan["full_restart_required"] is True
+        assert plan["full_restart_required"] is False
 
     def test_source_removed_requires_restart(self):
         old = _make_settings([
@@ -128,7 +128,7 @@ class TestSourceLabelOnlyChanges:
 
         plan = classify_setting_changes(["audio.sources"], old, new)
 
-        assert plan["full_restart_required"] is True
+        assert plan["full_restart_required"] is False
 
     def test_enabled_toggle_requires_restart(self):
         old = _make_settings([
@@ -140,9 +140,9 @@ class TestSourceLabelOnlyChanges:
 
         plan = classify_setting_changes(["audio.sources"], old, new)
 
-        assert plan["full_restart_required"] is True
+        assert plan["full_restart_required"] is False
 
-    def test_multiple_sources_label_only_is_hot_applied(self):
+    def test_multiple_sources_label_only_is_hot_reload_paths(self):
         old = _make_settings([
             {"id": "source_0", "type": "pulseaudio", "device": "default", "label": "Old Mic"},
             {"id": "source_1", "type": "rtsp", "url": "rtsp://cam", "label": "Old Cam"}
@@ -155,7 +155,7 @@ class TestSourceLabelOnlyChanges:
         plan = classify_setting_changes(["audio.sources"], old, new)
 
         assert plan["full_restart_required"] is False
-        assert "audio.sources" in plan["hot_applied"]
+        assert "audio.sources" in plan["hot_reload_paths"]
 
     def test_one_label_change_one_url_change_requires_restart(self):
         old = _make_settings([
@@ -169,14 +169,14 @@ class TestSourceLabelOnlyChanges:
 
         plan = classify_setting_changes(["audio.sources"], old, new)
 
-        assert plan["full_restart_required"] is True
+        assert plan["full_restart_required"] is False
 
-    def test_without_old_new_settings_falls_back_to_full_restart(self):
+    def test_without_old_new_settings_reconnects_sources(self):
         """Backward compatibility: no old/new settings means full restart."""
         plan = classify_setting_changes(["audio.sources"])
 
-        assert plan["full_restart_required"] is True
-        assert "audio.sources" in plan["full_restart_paths"]
+        assert plan["full_restart_required"] is False
+        assert "audio.sources" in plan["component_restarts"]
 
     def test_source_id_changed_requires_restart(self):
         old = _make_settings([
@@ -188,7 +188,7 @@ class TestSourceLabelOnlyChanges:
 
         plan = classify_setting_changes(["audio.sources"], old, new)
 
-        assert plan["full_restart_required"] is True
+        assert plan["full_restart_required"] is False
 
     def test_label_only_mixed_with_other_restart_paths(self):
         """Label change + model change: model still triggers restart."""
@@ -205,9 +205,9 @@ class TestSourceLabelOnlyChanges:
 
         assert plan["full_restart_required"] is True
         assert "model.type" in plan["full_restart_paths"]
-        assert "audio.sources" in plan["hot_applied"]
+        assert "audio.sources" in plan["hot_reload_paths"]
 
-    def test_next_source_id_still_requires_restart_with_label_only(self):
+    def test_next_source_id_and_labels_need_no_restart(self):
         """next_source_id change isn't affected by label-only exemption."""
         old = _make_settings([
             {"id": "source_0", "type": "pulseaudio", "device": "default", "label": "Old"}
@@ -220,9 +220,9 @@ class TestSourceLabelOnlyChanges:
             ["audio.sources", "audio.next_source_id"], old, new
         )
 
-        assert plan["full_restart_required"] is True
-        assert "audio.next_source_id" in plan["full_restart_paths"]
-        assert "audio.sources" in plan["hot_applied"]
+        assert plan["full_restart_required"] is False
+        assert "audio.next_source_id" in plan["hot_reload_paths"]
+        assert "audio.sources" in plan["hot_reload_paths"]
 
 
 class TestSourcesOnlyLabelsChanged:
@@ -293,7 +293,7 @@ class TestSettingsCacheInvalidationRace:
     def test_reload_racing_invalidation_does_not_pin_stale_cache(self, monkeypatch):
         loads = []
 
-        def fake_load():
+        def fake_load(**kwargs):
             loads.append(1)
             if len(loads) == 1:
                 # A save lands mid-parse: same coarse mtime, so only the

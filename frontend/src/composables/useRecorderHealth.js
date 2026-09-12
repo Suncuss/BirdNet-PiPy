@@ -13,9 +13,35 @@ import {
 import { RECORDER_DISMISSED_UNTIL_KEY } from '@/utils/storageKeys'
 
 // Module-level state (shared across all components - singleton). This is the
-// one owner of recorder status: the Settings badge and the app-wide status
-// pill both read it, so a live update reaches them together.
+// one owner of recorder broadcasts (the app-wide status pill) and of the
+// settings-status snapshots that only the Settings page watches.
 const recorderStatus = ref(null)
+const settingsStatus = ref(null)
+// Only the wait for a watcher's first snapshot is a loading state. A later
+// disconnect or silent connection is unavailability, so it must not bring
+// the skeleton back.
+const settingsStatusLoading = ref(false)
+// The API samples settings status only while a page asks for it, so pages
+// that do not show it cost the station nothing.
+let settingsWatchers = 0
+// The API emits a settings-status heartbeat every five seconds. Allow missed
+// beats, but never keep confirmed health indefinitely on a silent connection.
+const SETTINGS_STATUS_TIMEOUT = 15000
+let settingsStatusTimer = null
+
+const clearLiveStatus = () => {
+  clearTimeout(settingsStatusTimer)
+  settingsStatusTimer = null
+  settingsStatusLoading.value = false
+  settingsStatus.value = null
+  recorderStatus.value = null
+  requestRevision += 1
+}
+
+const armSettingsStatusTimeout = () => {
+  clearTimeout(settingsStatusTimer)
+  settingsStatusTimer = setTimeout(clearLiveStatus, SETTINGS_STATUS_TIMEOUT)
+}
 
 // Recorder warning is snoozable for 24h.
 const dismissal = useDismissible(RECORDER_DISMISSED_UNTIL_KEY, 24 * 60 * 60 * 1000)
@@ -50,16 +76,39 @@ const checkStatus = async () => {
 const connect = () => {
   if (socket) return
   socket = io({ path: SOCKET_PATH })
+  const connection = socket
+
+  // Server-side watch membership ends with the socket, so every (re)connection
+  // asks again while a page is watching.
+  socket.on('connect', () => {
+    if (socket === connection && settingsWatchers > 0) socket.emit('watch_settings_status')
+  })
 
   socket.once('connect_error', (error) => {
+    if (socket !== connection) return
+    clearLiveStatus()
     // Behind a proxy that blocks websockets, the REST value is all there is.
     console.warn('Recorder status WebSocket connection failed:', error)
     checkStatus()
   })
 
   socket.on('recorder_status', (status) => {
+    if (socket !== connection) return
     liveRevision += 1
     recorderStatus.value = status
+  })
+
+  socket.on('settings_status', (status) => {
+    if (socket !== connection) return
+    settingsStatusLoading.value = false
+    // Heartbeats repeat the snapshot; a new object would re-render every consumer.
+    const next = status || null
+    if (JSON.stringify(next) !== JSON.stringify(settingsStatus.value)) settingsStatus.value = next
+    armSettingsStatusTimeout()
+  })
+
+  socket.on('disconnect', () => {
+    if (socket === connection) clearLiveStatus()
   })
 
   // A password change evicts every other device: the server closes the owner
@@ -72,10 +121,34 @@ const connect = () => {
   })
 }
 
+/**
+ * Ask the API for settings-status snapshots while a page shows them.
+ * Returns the matching unwatch; the last unwatch drops the snapshot so a
+ * later visit never opens on an old one.
+ */
+const watchSettingsStatus = () => {
+  if (settingsWatchers++ === 0) {
+    // A snapshot already held is not a loading state.
+    settingsStatusLoading.value = settingsStatus.value === null
+    armSettingsStatusTimeout()
+    if (socket?.connected) socket.emit('watch_settings_status')
+  }
+  let active = true
+  return () => {
+    if (!active) return
+    active = false
+    if (--settingsWatchers > 0) return
+    clearTimeout(settingsStatusTimer)
+    settingsStatusTimer = null
+    settingsStatusLoading.value = false
+    settingsStatus.value = null
+    if (socket?.connected) socket.emit('unwatch_settings_status')
+  }
+}
+
 /** Drop the subscription and the status it produced (logout, app teardown). */
 const disconnect = () => {
-  requestRevision += 1
-  recorderStatus.value = null
+  clearLiveStatus()
   if (!socket) return
   socket.disconnect()
   socket = null
@@ -113,6 +186,8 @@ export function useRecorderHealth() {
 
   return {
     recorderStatus,
+    settingsStatus,
+    settingsStatusLoading,
     showRecorderWarning,
     showPausedIndicator,
     pausedLabel,
@@ -121,6 +196,7 @@ export function useRecorderHealth() {
     dismissWarning: dismissal.dismiss,
     checkStatus,
     connect,
-    disconnect
+    disconnect,
+    watchSettingsStatus
   }
 }

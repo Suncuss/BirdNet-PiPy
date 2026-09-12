@@ -5,8 +5,12 @@ reads go through the runtime-settings cache (core.runtime_config) and writes
 are atomic. The routes in core/routes/settings.py own request parsing and the
 restart-required classification; this module owns the file.
 """
+import hashlib
+import json
 from functools import wraps
 from threading import Lock
+
+from flask import jsonify, make_response, request
 
 from config.settings import USER_SETTINGS_PATH, get_default_settings
 from core.logging_config import get_logger
@@ -16,6 +20,7 @@ from core.runtime_config import (
     invalidate_runtime_settings_cache,
 )
 from core.secure_file import atomic_write_private_json
+from core.settings_validation import validate_settings
 
 logger = get_logger(__name__)
 
@@ -31,61 +36,57 @@ def serialize_settings_write(func):
     @wraps(func)
     def serialized(*args, **kwargs):
         with _settings_write_lock:
-            return func(*args, **kwargs)
+            try:
+                current = get_runtime_settings(force_reload=True, strict=True)
+            except (ValueError, OSError):
+                return jsonify({'error': 'Saved settings could not be read. Repair the settings file before saving.'}), 503
+            # The ETag hashes the saved document. nginx marks it weak (W/) when
+            # it compresses the response, which does not change that revision.
+            expected = (request.headers.get('If-Match') or '').removeprefix('W/')
+            if expected and expected != settings_etag(current):
+                return jsonify({'error': 'Settings changed in another session. Refresh and retry.'}), 412
+            try:
+                result = func(*args, **kwargs)
+            except ValueError as exc:
+                return jsonify({'error': str(exc)}), 400
+            response = make_response(result)
+            if response.status_code < 300:
+                saved = load_user_settings()
+                response.headers['ETag'] = settings_etag(saved)
+                payload = response.get_json(silent=True)
+                if isinstance(payload, dict):
+                    payload.setdefault('settings', saved)
+                    response.set_data(json.dumps(payload))
+            return response
     serialized._serializes_settings_write = True
     return serialized
 
 
 def load_user_settings():
     """Compatibility wrapper around runtime settings loader."""
-    return get_runtime_settings(force_reload=True)
+    return get_runtime_settings()
 
 
-VALID_NOTIFICATION_FIELDS = {
-    'apprise_urls', 'every_detection', 'rate_limit_seconds',
-    'first_of_day', 'new_species', 'rare_species', 'rare_threshold', 'rare_window_days',
-    'audio_status'
-}
+def settings_etag(settings):
+    """Opaque content revision; the precondition is checked under the write lock."""
+    data = json.dumps(settings, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    return '"' + hashlib.sha256(data.encode()).hexdigest() + '"'
+
 
 def _validate_notification_settings(notif):
-    """Validate notification settings fields.
-
-    Returns error string if invalid, None if valid.
-    """
-    if not isinstance(notif, dict):
-        return 'notifications must be a JSON object'
-    unknown = set(notif.keys()) - VALID_NOTIFICATION_FIELDS
-    if unknown:
-        return f'Unknown notification fields: {", ".join(sorted(unknown))}'
-    for bool_field in ('every_detection', 'first_of_day', 'new_species',
-                       'rare_species', 'audio_status'):
-        if bool_field in notif and not isinstance(notif[bool_field], bool):
-            return f'notifications.{bool_field} must be a boolean'
-    if 'apprise_urls' in notif:
-        urls = notif['apprise_urls']
-        if not isinstance(urls, list) or not all(isinstance(u, str) for u in urls):
-            return 'notifications.apprise_urls must be a list of strings'
-    if 'rate_limit_seconds' in notif:
-        rls = notif['rate_limit_seconds']
-        if not isinstance(rls, (int, float)) or rls < 0:
-            return 'notifications.rate_limit_seconds must be a non-negative number'
-    if 'rare_threshold' in notif:
-        rt = notif['rare_threshold']
-        if not isinstance(rt, int) or rt < 0:
-            return 'notifications.rare_threshold must be a non-negative integer'
-    if 'rare_window_days' in notif:
-        rwd = notif['rare_window_days']
-        if not isinstance(rwd, int) or rwd < 1:
-            return 'notifications.rare_window_days must be a positive integer'
-    return None
+    return validate_settings({'notifications': notif})
 
 
 def save_user_settings(settings_dict):
     """Save settings to JSON file atomically"""
+    error = validate_settings(settings_dict)
+    if error:
+        raise ValueError(error)
     json_path = USER_SETTINGS_PATH
     # The file carries RTSP credentials, notification URLs, the BirdWeather ID
     # and coordinates. Its temporary file is 0600 before content is written.
     atomic_write_private_json(json_path, settings_dict)
+    invalidate_runtime_settings_cache()
 
     logger.info("User settings saved", extra={
         'path': json_path

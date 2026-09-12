@@ -19,10 +19,12 @@ export function createCoalescedLoader() {
     /** Run `loader` once; concurrent and subsequent callers share the result. */
     ensure(loader) {
       if (!promise) {
-        promise = loader().then((ok) => {
-          if (!ok) promise = null
+        const pending = loader().then((ok) => {
+          // reset() may have started a replacement load while this one ran.
+          if (!ok && promise === pending) promise = null
           return ok
         })
+        promise = pending
       }
       return promise
     },

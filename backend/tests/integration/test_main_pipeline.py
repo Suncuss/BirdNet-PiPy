@@ -1678,6 +1678,42 @@ class TestRecordingThread:
         return TestRecordingThread._settings_with_sources(
             quiet_hours={'enabled': True, 'start': start, 'end': end})
 
+    def test_failed_reload_stop_does_not_restart_old_configuration(self, mock_recorder, controllable_stop_flag):
+        original = self._settings_with_sources()
+        changed = self._settings_with_sources()
+        changed['audio']['sources'][0]['device'] = 'replacement'
+        mock_recorder.is_healthy.return_value = False
+        mock_recorder.stop.side_effect = RuntimeError('still stopping')
+        with patch('core.main.get_runtime_settings', side_effect=[original, changed]), \
+             patch('core.main.create_recorder', return_value=mock_recorder) as create, \
+             patch('core.main.stop_flag') as stop, \
+             patch('core.main.broadcast_recorder_status') as broadcast, \
+             patch('core.main._maybe_notify_audio_status'), \
+             patch('time.sleep'):
+            stop.is_set.side_effect = controllable_stop_flag(iterations=1)
+            from core.main import continuous_audio_recording
+            continuous_audio_recording(Mock())
+
+        create.assert_called_once()
+        mock_recorder.restart.assert_not_called()
+        assert broadcast.call_args.args[0]['sources']['source_0']['reload_error'] == 'Could not stop previous recorder; retrying'
+
+    def test_health_restart_failure_is_reported(self, mock_recorder, controllable_stop_flag):
+        mock_recorder.is_healthy.return_value = False
+        mock_recorder.restart.side_effect = RuntimeError('cannot start')
+        with patch('core.main.get_runtime_settings', return_value=self._settings_with_sources()), \
+             patch('core.main.create_recorder', return_value=mock_recorder), \
+             patch('core.main.stop_flag') as stop, \
+             patch('core.main.broadcast_recorder_status') as broadcast, \
+             patch('core.main._maybe_notify_audio_status'), \
+             patch('time.sleep'):
+            stop.is_set.side_effect = controllable_stop_flag(iterations=1)
+            from core.main import continuous_audio_recording
+            continuous_audio_recording(Mock())
+
+        mock_recorder.restart.assert_called_once()
+        assert broadcast.call_args.args[0]['sources']['source_0']['reload_error'] == 'Could not restart recorder; retrying'
+
     def test_quiet_hours_skip_recorder_start_and_broadcast_paused(
         self, mock_recorder, controllable_stop_flag
     ):
@@ -1698,9 +1734,9 @@ class TestRecordingThread:
             mock_create.assert_not_called()
             mock_recorder.start.assert_not_called()
             mock_broadcast.assert_called_once()
-            args, kwargs = mock_broadcast.call_args
-            assert args[0] == 'paused'
-            assert kwargs['pause'] == {'reason': 'quiet_hours', 'resumes_at': '2026-08-25T06:00'}
+            snapshot = mock_broadcast.call_args.args[0]
+            assert snapshot['state'] == 'paused'
+            assert snapshot['pause'] == {'reason': 'quiet_hours', 'resumes_at': '2026-08-25T06:00'}
 
     def test_quiet_hours_stop_recorders_on_entry_and_restart_on_exit(
         self, mock_recorder, controllable_stop_flag
@@ -1729,9 +1765,9 @@ class TestRecordingThread:
             assert mock_create.call_count == 2          # init + resume
             assert mock_recorder.start.call_count == 2
             assert mock_recorder.stop.call_count == 2   # pause + shutdown
-            states = [c.args[0] for c in mock_broadcast.call_args_list]
+            states = [c.args[0]['state'] for c in mock_broadcast.call_args_list]
             assert states == ['running', 'paused', 'running']
-            assert mock_broadcast.call_args_list[-1].kwargs['pause'] is None
+            assert mock_broadcast.call_args_list[-1].args[0]['pause'] is None
 
     def test_paused_status_rebroadcasts_when_window_end_changes(
         self, mock_recorder, controllable_stop_flag
@@ -1756,7 +1792,7 @@ class TestRecordingThread:
             from core.main import continuous_audio_recording
             continuous_audio_recording(Mock())
 
-            resumes = [c.kwargs['pause']['resumes_at'] for c in mock_broadcast.call_args_list]
+            resumes = [c.args[0]['pause']['resumes_at'] for c in mock_broadcast.call_args_list]
             assert resumes == ['2026-08-25T06:00', '2026-08-25T07:00']
 
     def test_quiet_hours_are_invisible_to_audio_status_notifier(
@@ -1811,9 +1847,9 @@ class TestRecordingThread:
 
             mock_create.assert_not_called()
             mock_broadcast.assert_called_once()
-            args, kwargs = mock_broadcast.call_args
-            assert args[0] == 'paused'
-            assert kwargs['pause'] == {'reason': 'no_sources', 'resumes_at': None}
+            snapshot = mock_broadcast.call_args.args[0]
+            assert snapshot['state'] == 'paused'
+            assert snapshot['pause'] == {'reason': 'no_sources', 'resumes_at': None}
 
     def test_disabling_and_re_enabling_the_last_source_never_alerts(
         self, mock_recorder, controllable_stop_flag
@@ -1840,7 +1876,7 @@ class TestRecordingThread:
             from core.main import continuous_audio_recording
             continuous_audio_recording(Mock())
 
-            states = [c.args[0] for c in mock_broadcast.call_args_list]
+            states = [c.args[0]['state'] for c in mock_broadcast.call_args_list]
             assert states == ['running', 'paused', 'running']
             assert mock_create.call_count == 2  # init + resume
             # 'stopped' never reaches the notifier, so no false alert goes out.

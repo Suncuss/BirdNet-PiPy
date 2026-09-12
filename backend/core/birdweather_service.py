@@ -45,6 +45,7 @@ class BirdWeatherService:
         self._station_id = station_id
         self._queue: queue.Queue = queue.Queue(maxsize=BIRDWEATHER_QUEUE_MAXSIZE)
         self._stop_event = threading.Event()
+        self._queue_lock = threading.Lock()  # hub-only: unused in API; workers run only in unpatched main
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
         logger.info("BirdWeather service started", extra={'station_id': station_id[:8] + '...'})
@@ -61,12 +62,20 @@ class BirdWeatherService:
             start_time: Start time in seconds within the audio file
             end_time: End time in seconds within the audio file
         """
+        if self._stop_event.is_set():
+            return
+        detection = dict(detection)
+        detection['timestamp'] = _to_iso8601_with_tz(detection.get('timestamp', local_now().isoformat()))
         # Extract FLAC synchronously to avoid race condition with file deletion
         flac_path = self._extract_flac(audio_path, start_time, end_time)
         if flac_path:
             clip_duration = end_time - start_time
             try:
-                self._queue.put_nowait((detection, flac_path, clip_duration))
+                with self._queue_lock:
+                    if self._stop_event.is_set():
+                        os.remove(flac_path)
+                        return
+                    self._queue.put_nowait((detection, flac_path, clip_duration))
             except queue.Full:
                 logger.warning("BirdWeather queue full, dropping upload", extra={
                     'species': detection.get('common_name')
@@ -80,12 +89,26 @@ class BirdWeatherService:
         """Process uploads sequentially in background."""
         while not self._stop_event.is_set():
             try:
+                station_id = get_runtime_settings().get('birdweather', {}).get('id')
+            except (OSError, ValueError):
+                # No valid configuration: stop sharing, and clean queued clips.
+                station_id = None
+            if station_id != self._station_id:
+                self._stop_event.set()
+                self._discard_pending()
+                return
+            try:
                 item = self._queue.get(timeout=1)
             except queue.Empty:
                 continue
             try:
+                if (self._stop_event.is_set() or
+                        get_runtime_settings().get('birdweather', {}).get('id') != self._station_id):
+                    self._remove_flac(item[1])
+                    continue
                 self._do_publish(*item)
             except Exception as e:
+                self._remove_flac(item[1])
                 logger.error("BirdWeather upload failed", extra={'error': str(e)})
 
     def _do_publish(self, detection: dict[str, Any], flac_path: str,
@@ -105,6 +128,9 @@ class BirdWeatherService:
             # 1. Upload soundscape
             soundscape_id = self._upload_soundscape(flac_path, timestamp_str)
             if not soundscape_id:
+                return
+            if (self._stop_event.is_set() or
+                    get_runtime_settings().get('birdweather', {}).get('id') != self._station_id):
                 return
 
             # 2. Upload detection (offsets are relative to the uploaded clip: 0 to duration)
@@ -203,8 +229,8 @@ class BirdWeatherService:
 
         # Offsets are relative to the uploaded soundscape clip (0 to clip_duration)
         location = get_runtime_settings().get('location', {})
-        lat = location.get('latitude', LAT)
-        lon = location.get('longitude', LON)
+        lat = detection.get('latitude', location.get('latitude', LAT))
+        lon = detection.get('longitude', location.get('longitude', LON))
         payload = {
             'timestamp': timestamp,
             'lat': lat,
@@ -244,9 +270,26 @@ class BirdWeatherService:
             logger.warning("Detection upload error", extra={'error': str(e)})
             return False
 
+    @staticmethod
+    def _remove_flac(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    def _discard_pending(self):
+        with self._queue_lock:
+            while True:
+                try:
+                    item = self._queue.get_nowait()
+                except queue.Empty:
+                    return
+                self._remove_flac(item[1])
+
     def stop(self) -> None:
         """Stop background worker thread."""
         self._stop_event.set()
+        self._discard_pending()
         if self._worker.is_alive():
             self._worker.join(timeout=2)
 
@@ -273,7 +316,8 @@ def get_birdweather_service() -> BirdWeatherService | None:
 
     if _birdweather_service is None:
         _birdweather_service = BirdWeatherService(station_id)
-    elif _birdweather_service._station_id != station_id:
+    elif (_birdweather_service._station_id != station_id
+          or _birdweather_service._stop_event.is_set()):
         logger.info("BirdWeather station changed, restarting service")
         _birdweather_service.stop()
         _birdweather_service = BirdWeatherService(station_id)

@@ -136,6 +136,8 @@ def auth_setup():
         # Validation is handled by setup_password() - no duplicate check needed
 
         setup_password(password)
+        from core.api import revoke_public_sockets
+        revoke_public_sockets(force=True)
 
         # Auto-login after setup
         authenticate(password)
@@ -171,12 +173,17 @@ def auth_toggle():
             return jsonify({'error': 'enabled field required'}), 400
 
         enabled = data['enabled']
+        if type(enabled) is not bool:
+            return jsonify({'error': 'enabled must be a boolean'}), 400
 
         # Prevent enabling auth without a password set
         if enabled and not is_setup_complete():
             return jsonify({'error': 'Cannot enable authentication without setting a password first'}), 400
 
         set_auth_enabled(enabled)
+        if enabled:
+            from core.api import revoke_public_sockets
+            revoke_public_sockets(force=True)
 
         return jsonify({
             'success': True,
@@ -219,6 +226,8 @@ def save_access_settings():
     current_settings['access'].update(data)
     save_user_settings(current_settings)
     invalidate_runtime_settings_cache()
+    from core.api import revoke_public_sockets
+    revoke_public_sockets()
 
     return jsonify({
         'success': True,

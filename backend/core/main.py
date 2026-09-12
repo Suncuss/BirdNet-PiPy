@@ -4,6 +4,7 @@ import os
 import signal
 import threading
 import time
+import wave
 from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -16,11 +17,11 @@ from config.settings import (
     API_HOST,
     API_PORT,
     BIRDNET_SERVER_ENDPOINT,
-    BIRDWEATHER_ID,
     EXTRACTED_AUDIO_DIR,
     LAT,
     LOCATION_CONFIGURED,
     LON,
+    MODEL_TYPE,
     RECORDING_DIR,
     RECORDING_LENGTH,
     SAMPLE_RATE,
@@ -51,6 +52,7 @@ from core.recording_schedule import (
     evaluate_recording_gate,
 )
 from core.runtime_config import get_runtime_settings, resolve_source_label
+from core.source_config import reconcile_recorders, recorder_source_revision
 from core.spectrogram import generate_spectrogram
 from core.storage_manager import storage_monitor_loop
 from core.timezone_service import get_timezone_str, local_now
@@ -74,7 +76,7 @@ BIRDNET_RETRY_BASE_DELAY = 2  # Base delay for exponential backoff (seconds)
 RECORDING_THREAD_SHUTDOWN_TIMEOUT = 10  # Max wait for recording thread (seconds)
 PROCESSING_THREAD_SHUTDOWN_TIMEOUT = 5  # Max wait for processing thread (seconds)
 DEGRADED_FAILURE_THRESHOLD = 3  # Consecutive failures before 'degraded' state
-STATUS_REFRESH_INTERVAL = 60   # Re-broadcast recorder status every N seconds
+STATUS_REFRESH_INTERVAL = 5   # Re-broadcast recorder status every N seconds
 AUDIO_STATUS_NOTIFY_COOLDOWN = 600  # Min seconds between repeat audio-degradation alerts
 
 # (pausing, resuming) log lines per gate reason (core.recording_schedule),
@@ -111,16 +113,6 @@ def _get_recording_length(audio_settings: dict[str, Any]) -> float:
 
 def _get_analysis_chunk_length() -> float:
     return get_runtime_settings().get('audio', {}).get('recording_chunk_length', ANALYSIS_CHUNK_LENGTH)
-
-
-def _get_recorder_signature(audio_settings: dict[str, Any]) -> tuple:
-    """Hash the enabled sources to detect config changes."""
-    enabled = enabled_sources(audio_settings)
-    source_tuples = tuple(
-        (s.get('id'), s.get('type'), s.get('url', ''), s.get('device', ''))
-        for s in enabled
-    )
-    return (source_tuples, _get_recording_length(audio_settings))
 
 
 def _is_valid_timezone(tz: str | None) -> bool:
@@ -238,46 +230,80 @@ def _get_aggregate_state(
     return RecorderState.RUNNING
 
 
-def broadcast_recorder_status(
+def build_recorder_status(
     state: str, recorders: dict[str, BaseRecorder],
-    sources: list[dict], thread_logger,
+    sources: list[dict], settings: dict,
     health_cache: dict[str, bool] | None = None,
     pause: dict | None = None,
-) -> bool:
-    """Send recorder health status to API for WebSocket broadcast.
+    failures: dict | None = None,
+) -> dict:
+    """Sample once for both change detection and WebSocket delivery.
 
     ``pause`` (see _pause_payload) marks an intentional stop: sources
     without a recorder then report 'paused' rather than 'stopped' so the
     UI can tell quiet hours from a fault.
-
-    Returns True if broadcast succeeded, False otherwise.
     """
-    try:
-        per_source = {}
-        for source in sources:
-            sid = source.get('id', '')
-            recorder = recorders.get(sid)
-            if recorder:
-                healthy = health_cache[sid] if health_cache else recorder.is_healthy()
-                per_source[sid] = {
-                    'label': source.get('label', sid),
-                    'type': source.get('type', ''),
-                    'state': _get_recorder_state(recorder, healthy),
-                    **recorder.get_health_status(healthy=healthy),
-                }
-            else:
-                per_source[sid] = {
-                    'label': source.get('label', sid),
-                    'type': source.get('type', ''),
-                    'state': RecorderState.PAUSED if pause else RecorderState.STOPPED,
-                    **BaseRecorder.default_health_status(),
-                }
+    per_source = {}
+    reported_sources = {source['id']: source for source in sources}
+    for sid in recorders:
+        reported_sources.setdefault(sid, {'id': sid})
+    for source in reported_sources.values():
+        sid = source.get('id', '')
+        recorder = recorders.get(sid)
+        if recorder:
+            healthy = health_cache[sid] if health_cache else recorder.is_healthy()
+            per_source[sid] = {
+                'label': source.get('label', sid),
+                'type': source.get('type', ''),
+                'state': _get_recorder_state(recorder, healthy),
+                **recorder.get_health_status(healthy=healthy),
+                'config_revision': getattr(recorder, 'config_revision', None),
+                'application_state': ('active' if recorder.last_success_time and healthy
+                                      and not recorder.consecutive_failures else
+                                      'failed' if recorder.consecutive_failures else 'connecting'),
+            }
+        else:
+            per_source[sid] = {
+                'label': source.get('label', sid),
+                'type': source.get('type', ''),
+                'state': RecorderState.PAUSED if pause else RecorderState.STOPPED,
+                **BaseRecorder.default_health_status(),
+            }
+        if failures and sid in failures:
+            per_source[sid]['reload_error'] = failures[sid]
 
-        status_data = {
-            'state': state,
-            'sources': per_source,
-            'pause': pause,
-        }
+    status_data = {
+        'state': state,
+        'sources': per_source,
+        'pause': pause,
+        'model_type': MODEL_TYPE,
+        'updated_at': time.time(),
+        'source_settings_revisions': {
+            source['id']: recorder_source_revision(source, settings)
+            for source in settings.get('audio', {}).get('sources', [])
+        },
+    }
+    return status_data
+
+
+def recorder_status_key(status):
+    """Ignore changing metrics; states, errors and acknowledgements trigger delivery.
+
+    Full counters and timestamps still travel on the periodic heartbeat.
+    """
+    return {
+        **{key: value for key, value in status.items() if key != 'updated_at'},
+        'sources': {
+            sid: {key: value for key, value in source.items()
+                  if key not in {'last_success_time', 'last_error_time', 'consecutive_failures'}}
+            for sid, source in status['sources'].items()
+        },
+    }
+
+
+def broadcast_recorder_status(status_data: dict, thread_logger) -> bool:
+    """Send the sampled status; acknowledge only successful HTTP delivery."""
+    try:
         resp = requests.post(
             f'http://{API_HOST}:{API_PORT}/api/broadcast/recorder-status',
             json=status_data,
@@ -447,9 +473,8 @@ def continuous_audio_recording(thread_logger):
     It does not scan for files or queue them - that's the processing thread's job.
     """
     recorders: dict[str, BaseRecorder] = {}  # source_id → recorder
-    current_signature: tuple | None = None
-    last_broadcast_state: str | None = None
-    last_broadcast_pause: dict | None = None
+    recording_failures: dict[str, str] = {}
+    last_broadcast_key: dict | None = None
     last_broadcast_time: float = 0.0
     last_notify_state: str | None = None
     audio_alert_tracker = _AudioAlertTracker()
@@ -457,28 +482,24 @@ def continuous_audio_recording(thread_logger):
     pause_reason: str | None = None
     schedule_error: str | None = None
 
-    def _start_all(audio_settings, sig):
-        nonlocal current_signature
-        enabled = enabled_sources(audio_settings)
-        recording_length = _get_recording_length(audio_settings)
-        for source in enabled:
-            sid = source.get('id', 'unknown')
-            try:
-                rec = setup_recorder(source, recording_length, thread_logger)
-                rec.start()
-                recorders[sid] = rec
-            except ValueError as e:
-                thread_logger.error("Recorder configuration invalid",
-                                    extra={'source_id': sid, 'error': str(e)})
-        current_signature = sig
+    def _reconcile(audio_settings):
+        nonlocal recording_failures
+        recording_failures = reconcile_recorders(
+            recorders, enabled_sources(audio_settings), _get_recording_length(audio_settings),
+            lambda source, length: setup_recorder(source, length, thread_logger))
+        for sid, error in recording_failures.items():
+            thread_logger.warning(error, extra={'source_id': sid})
 
     def _stop_all():
-        for sid, rec in recorders.items():
+        nonlocal recording_failures
+        recording_failures = {}
+        for sid, rec in list(recorders.items()):
             try:
                 rec.stop()
+                del recorders[sid]
             except Exception as e:
+                recording_failures[sid] = 'Could not stop recorder; retrying'
                 thread_logger.debug(f"Error stopping recorder {sid}: {e}")
-        recorders.clear()
 
     def _apply_gate(decision: ScheduleDecision) -> None:
         """Enter or leave the paused state, logging once per transition.
@@ -500,8 +521,9 @@ def continuous_audio_recording(thread_logger):
                 _PAUSE_LOG.get(decision.reason, _PAUSE_LOG_DEFAULT)[0],
                 extra=_pause_payload(decision))
             pause_reason = decision.reason
-        if recorders:
-            _stop_all()
+        # Also with nothing to stop: a start failure from before the pause is
+        # not a fault of the pause, and nothing retries it until recording resumes.
+        _stop_all()
 
     try:
         # Initialize recorders on startup (unless the schedule says not to)
@@ -511,7 +533,7 @@ def continuous_audio_recording(thread_logger):
             initial_decision = evaluate_recording_gate(initial_settings, local_now())
             _apply_gate(initial_decision)
             if initial_decision.record:
-                _start_all(initial_audio_settings, _get_recorder_signature(initial_audio_settings))
+                _reconcile(initial_audio_settings)
         except Exception as e:
             log_fd_exhaustion_if_needed(e, thread_logger, 'recording_loop_init')
             thread_logger.error("Recording loop error", extra={'error': str(e)}, exc_info=True)
@@ -521,20 +543,13 @@ def continuous_audio_recording(thread_logger):
             try:
                 settings = get_runtime_settings()
                 audio_settings = settings.get('audio', {})
-                new_signature = _get_recorder_signature(audio_settings)
                 decision = evaluate_recording_gate(settings, local_now())
                 schedule_error = _log_schedule_error(decision, schedule_error, thread_logger)
                 _apply_gate(decision)
                 paused = not decision.record
 
-                if paused:
-                    pass  # recorders are down on purpose; nothing to (re)start
-                elif not recorders:
-                    _start_all(audio_settings, new_signature)
-                elif new_signature != current_signature:
-                    thread_logger.info("🔴 Audio settings changed, reloading recorders")
-                    _stop_all()
-                    _start_all(audio_settings, new_signature)
+                if not paused:
+                    _reconcile(audio_settings)
 
                 # Check recorder health (once per recorder) and restart unhealthy ones
                 health_cache = {
@@ -542,9 +557,13 @@ def continuous_audio_recording(thread_logger):
                     for sid, recorder in recorders.items()
                 }
                 for sid, healthy in health_cache.items():
-                    if not healthy:
+                    if not paused and not healthy and sid not in recording_failures:
                         thread_logger.warning(f"Recorder {sid} unhealthy, restarting...")
-                        recorders[sid].restart()
+                        try:
+                            recorders[sid].restart()
+                        except Exception:
+                            recording_failures[sid] = 'Could not restart recorder; retrying'
+                            thread_logger.warning('Recorder restart failed; retrying', extra={'source_id': sid})
                         health_cache[sid] = recorders[sid].is_healthy()
 
                 # Broadcast status on state change or periodic refresh
@@ -554,23 +573,16 @@ def continuous_audio_recording(thread_logger):
                     RecorderState.PAUSED if paused
                     else _get_aggregate_state(recorders, health_cache)
                 )
-                # Pause metadata counts as state: editing the window's end
-                # while paused must not leave a stale resumes_at until the
-                # next periodic refresh.
-                state_changed = (
-                    current_state != last_broadcast_state
-                    or pause_info != last_broadcast_pause
+                status_data = build_recorder_status(
+                    current_state, recorders, active_sources, settings, health_cache,
+                    pause=pause_info, failures=recording_failures,
                 )
-                refresh_due = (time.time() - last_broadcast_time) >= STATUS_REFRESH_INTERVAL
-                if state_changed or refresh_due:
-                    ok = broadcast_recorder_status(
-                        current_state, recorders, active_sources, thread_logger,
-                        health_cache, pause=pause_info,
-                    )
-                    if ok:
-                        last_broadcast_state = current_state
-                        last_broadcast_pause = pause_info
-                        last_broadcast_time = time.time()
+                status_key = recorder_status_key(status_data)
+                refresh_due = (time.monotonic() - last_broadcast_time) >= STATUS_REFRESH_INTERVAL
+                if status_key != last_broadcast_key or refresh_due:
+                    if broadcast_recorder_status(status_data, thread_logger):
+                        last_broadcast_key = status_key
+                        last_broadcast_time = time.monotonic()
 
                 # Runs even if the broadcast above failed, so a flaky API
                 # socket can't mask audio degradation. A pause (quiet hours
@@ -617,7 +629,7 @@ def extract_detection_audio(detection: dict[str, Any], input_file_path: str) -> 
     Returns:
         Tuple of (path to the MP3 file, size in bytes)
     """
-    analysis_chunk_length = _get_analysis_chunk_length()
+    analysis_chunk_length = detection.get('bird_song_duration', _get_analysis_chunk_length())
     step_seconds = detection.get('step_seconds', analysis_chunk_length)
     audio_segments_indices = select_audio_chunks(
         detection['chunk_index'], detection['total_chunks'])
@@ -648,7 +660,7 @@ def create_detection_spectrogram(detection: dict[str, Any], input_file_path: str
     Returns:
         Tuple of (path to the spectrogram image, size in bytes)
     """
-    analysis_chunk_length = _get_analysis_chunk_length()
+    analysis_chunk_length = detection.get('bird_song_duration', _get_analysis_chunk_length())
     step_seconds = detection.get('step_seconds', analysis_chunk_length)
     spectrogram_path = os.path.join(SPECTROGRAM_DIR, detection['spectrogram_file_name'])
 
@@ -820,16 +832,14 @@ def handle_detection(detection: dict[str, Any], input_file_path: str, thread_log
                 pass
         return
 
-    # Upload to BirdWeather if configured
-    birdweather_id = runtime_settings.get('birdweather', {}).get('id', BIRDWEATHER_ID)
-    if birdweather_id:
-        bw_service = get_birdweather_service()
-        if bw_service:
-            analysis_chunk_length = _get_analysis_chunk_length()
-            step_seconds = detection.get('step_seconds', analysis_chunk_length)
-            bw_start_time = step_seconds * detection['chunk_index']
-            bw_end_time = bw_start_time + analysis_chunk_length
-            bw_service.publish(detection, input_file_path, bw_start_time, bw_end_time)
+    # Calling the lifecycle owner also applies disable requests.
+    bw_service = get_birdweather_service()
+    if bw_service:
+        analysis_chunk_length = detection.get('bird_song_duration', _get_analysis_chunk_length())
+        step_seconds = detection.get('step_seconds', analysis_chunk_length)
+        bw_start_time = step_seconds * detection['chunk_index']
+        bw_service.publish(detection, input_file_path, bw_start_time,
+                           bw_start_time + analysis_chunk_length)
 
     broadcast_detection(detection, thread_logger)
 
@@ -850,11 +860,11 @@ def is_valid_recording(file_path: str, thread_logger) -> bool:
     """
     try:
         file_size = os.path.getsize(file_path)
-        # Calculate duration: mono 16-bit = 2 bytes per sample
-        actual_duration = file_size / (SAMPLE_RATE * 2)
-        min_acceptable_size = SAMPLE_RATE * 2 * MIN_RECORDING_DURATION
+        # Captured WAV metadata remains valid across model/sample-rate changes.
+        with wave.open(file_path, 'rb') as recording:
+            actual_duration = recording.getnframes() / recording.getframerate()
 
-        if file_size >= min_acceptable_size:
+        if actual_duration >= MIN_RECORDING_DURATION:
             return True
         else:
             thread_logger.warning("Recording too short, removing", extra={
@@ -865,7 +875,7 @@ def is_valid_recording(file_path: str, thread_logger) -> bool:
             })
             return False
 
-    except OSError as e:
+    except (OSError, wave.Error, EOFError) as e:
         log_fd_exhaustion_if_needed(e, thread_logger, 'validate_recording', extra={
             'file': os.path.basename(file_path),
         })
@@ -1066,6 +1076,8 @@ def process_audio_file(audio_file_path: str) -> list[dict[str, Any]]:
                 timeout=BIRDNET_REQUEST_TIMEOUT
             )
 
+            if response.status_code == 503:
+                raise ModelServiceUnavailableError('BirdNet service temporarily unavailable')
             if response.status_code == 200:
                 detections = response.json()
                 logger.debug("BirdNet analysis complete", extra={
@@ -1130,6 +1142,9 @@ def process_audio_file(audio_file_path: str) -> list[dict[str, Any]]:
             raise ModelServiceUnavailableError(
                 "BirdNet service request failed"
             ) from e
+
+        except ModelServiceUnavailableError:
+            raise
 
         except Exception as e:
             log_fd_exhaustion_if_needed(e, logger, 'birdnet_request', extra={
