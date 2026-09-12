@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed stations refusing to start after an update when a saved setting breaks a rule added since it was written, such as equal storage trigger and target percentages; such values now load with a logged warning and can be corrected under Settings.
 - Improved station load by sampling settings status and probing the model service only while the Settings page is open, instead of for every connected browser on every page.
 - Fixed the Settings audio summary staying unavailable after another device saved settings, until the window regained focus.
 - Fixed settings saves from API clients behind a compressing proxy failing the revision check.

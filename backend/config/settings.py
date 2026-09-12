@@ -315,10 +315,19 @@ def load_user_settings(*, strict=False, persist_migrations=True):
                 if isinstance(quiet, dict):
                     schedule['quiet_hours'] = {**DEFAULT_SETTINGS['schedule']['quiet_hours'], **quiet}
                 if strict:
-                    from core.settings_validation import validate_settings
-                    error = validate_settings(defaults)
+                    from core.settings_validation import (
+                        validate_settings,
+                        validate_settings_shape,
+                    )
+                    error = validate_settings_shape(defaults)
                     if error:
                         raise ValueError(error)
+                    # A file an older version wrote may break a rule added
+                    # since. Refusing it would stop the station; it is for
+                    # the user to fix under Settings, and saves still validate.
+                    error = validate_settings(defaults)
+                    if error:
+                        print(f"Settings: saved value outside current rules ({error}); adjust it under Settings")
                 return defaults
         except Exception as e:
             if strict:
