@@ -2,7 +2,8 @@
 
 ## [Unreleased]
 
-- Fixed stations refusing to start after an update when a saved setting breaks a rule added since it was written, such as equal storage trigger and target percentages; such values now load with a logged warning and can be corrected under Settings.
+- Fixed live streaming in the Home Assistant add-on with the new per-source stream supervisor: the Icecast start script now drops Icecast to its own account when started as root so the supervisor can read the add-on's root-owned settings, and idles instead of restart-looping when a wrapper ships without the supervisor. Stream listeners are no longer force-reconnected on access changes; nginx re-checks them on their next connection.
+- Fixed stations refusing to start after an update when a saved setting breaks a rule added since it was written, such as equal storage trigger and target percentages. Every rule now repairs such a value around what was set (the storage target moves below the trigger), and the Settings page names the problem when a hand-edited file cannot be read at all.
 - Improved station load by sampling settings status and probing the model service only while the Settings page is open, instead of for every connected browser on every page.
 - Fixed the Settings audio summary staying unavailable after another device saved settings, until the window regained focus.
 - Fixed settings saves from API clients behind a compressing proxy failing the revision check.
